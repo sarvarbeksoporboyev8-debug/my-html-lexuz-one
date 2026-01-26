@@ -308,15 +308,35 @@ def extract_title_from_url(url: str) -> str:
     return "Lex.uz hujjat"
 
 
-def ask_gemini_grounded(question: str) -> str:
+def ask_gemini_grounded(question: str, history: list = None) -> str:
     """Use Google Gemini with Search Grounding - THIS IS GOOGLE AI MODE!"""
     
     if not GEMINI_API_KEY:
         return None
     
+    # Build conversation contents
+    contents = []
+    
+    # Add chat history if provided
+    if history:
+        for msg in history[-10:]:  # Last 10 messages max
+            role = "user" if msg.get("role") == "user" else "model"
+            text = msg.get("content", "")
+            if text:
+                contents.append({
+                    "role": role,
+                    "parts": [{"text": text}]
+                })
+    
+    # Add current question with instructions
     full_question = f"""{question}
 
 O'zbek tilida javob ber. Qisqa va aniq (2-5 jumla). Manbalarga link ber. 5 ta tegishli savol ham ber."""
+    
+    contents.append({
+        "role": "user",
+        "parts": [{"text": full_question}]
+    })
     
     try:
         resp = requests.post(
@@ -324,11 +344,7 @@ O'zbek tilida javob ber. Qisqa va aniq (2-5 jumla). Manbalarga link ber. 5 ta te
             headers={"Content-Type": "application/json"},
             params={"key": GEMINI_API_KEY},
             json={
-                "contents": [
-                    {
-                        "parts": [{"text": full_question}]
-                    }
-                ],
+                "contents": contents,
                 "tools": [
                     {"google_search": {}}
                 ]
@@ -450,17 +466,19 @@ Tegishli savollar:
         return None
 
 
-def search_ask(question: str) -> str:
+def search_ask(question: str, history: list = None) -> str:
     """Main function: Gemini first (best), then Perplexity, then DuckDuckGo + DeepSeek."""
     
     print(f"\n{'='*60}")
     print(f"SAVOL: {question}")
+    if history:
+        print(f"HISTORY: {len(history)} messages")
     print('='*60)
     
     # 1. GEMINI - Primary choice (cheap + has web search)
     if GEMINI_API_KEY:
         print("\n[GEMINI] Using Google Gemini with Search Grounding...")
-        answer = ask_gemini_grounded(question)
+        answer = ask_gemini_grounded(question, history=history)
         if answer:
             return answer
         print("[GEMINI] Failed, trying Perplexity...")

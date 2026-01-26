@@ -65,8 +65,11 @@ class LexUZHandler(BaseHTTPRequestHandler):
                     self._send_error("Missing 'question' field")
                     return
                 
-                # Use the new search_ask
-                answer = search_ask(question)
+                # Get chat history if provided
+                history = data.get("history", [])
+                
+                # Use the new search_ask with history
+                answer = search_ask(question, history=history)
                 
                 self._send_json({
                     "question": question,
