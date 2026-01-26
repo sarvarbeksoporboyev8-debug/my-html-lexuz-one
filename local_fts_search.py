@@ -76,18 +76,26 @@ class LexUZFTSSearcher:
 
         # Pull more candidates, then enforce per-doc diversity via a window function.
         # bm25(): smaller is better.
+        # Join with documents table to get source_date and boost newer docs.
+        # Final rank = bm25 - (years_since_2020 * 0.5) so newer docs rank higher.
         sql = """
         WITH ranked AS (
             SELECT
-                rowid,
-                doc_id,
-                url,
-                title,
-                chunk_index,
+                c.rowid,
+                c.doc_id,
+                c.url,
+                c.title,
+                c.chunk_index,
                 snippet(chunks_fts, 4, '[', ']', '…', 18) AS snippet,
-                bm25(chunks_fts, 0.0, 0.0, 6.0, 0.0, 1.0) AS rank,
-                text
-            FROM chunks_fts
+                bm25(chunks_fts, 0.0, 0.0, 6.0, 0.0, 1.0) AS bm25_rank,
+                c.text,
+                d.source_date,
+                -- Boost newer documents: subtract years since 2020 * weight
+                -- Newer docs get lower (better) rank
+                bm25(chunks_fts, 0.0, 0.0, 6.0, 0.0, 1.0) - 
+                    (CAST(SUBSTR(COALESCE(d.source_date, '2020-01-01'), 1, 4) AS INTEGER) - 2020) * 0.3 AS rank
+            FROM chunks_fts c
+            LEFT JOIN documents d ON c.doc_id = d.doc_id
             WHERE chunks_fts MATCH ?
             ORDER BY rank
             LIMIT ?
@@ -97,7 +105,7 @@ class LexUZFTSSearcher:
                 ROW_NUMBER() OVER (PARTITION BY doc_id ORDER BY rank) AS rn
             FROM ranked
         )
-        SELECT doc_id, url, title, chunk_index, snippet, rank, text
+        SELECT doc_id, url, title, chunk_index, snippet, rank, text, source_date
         FROM dedup
         WHERE rn <= ?
         ORDER BY rank
