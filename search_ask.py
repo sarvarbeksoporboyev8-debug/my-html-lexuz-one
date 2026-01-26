@@ -226,28 +226,31 @@ def ask_llm(question: str, contexts: list[dict]) -> str:
     
     context_str = "\n\n---\n\n".join(context_parts)
     
-    prompt = f"""Siz O'zbekiston qonunchiligini yaxshi biladigan huquqiy yordamchi AI siz.
-
-Quyidagi manbalar va o'zingizning bilimlaringiz asosida savolga javob bering.
-
-QOIDALAR:
-1. Tabiiy, ravon o'zbek tilida javob yozing
-2. Javobda manbalardan foydalansangiz, [1], [2], [3] kabi raqamlar bilan ko'rsating
-3. Javob qisqa va aniq bo'lsin
-4. Javob oxirida ALBATTA quyidagi formatda yozing:
-
-Manbalar:
-(Barcha foydalanilgan manbalarni [N] format da yozing)
-
-Tegishli savollar:
-(5-6 ta tegishli savol yozing)
-
-MANBALAR (lex.uz):
-{context_str}
+    prompt = f"""Siz O'zbekiston qonunchiligi bo'yicha yordamchisiz.
 
 SAVOL: {question}
 
-JAVOB:"""
+QOIDALAR:
+1. FAQAT so'ralgan savolga javob bering - ortiqcha ma'lumot bermang
+2. Javob 2-4 jumla bo'lsin, kerak bo'lsa ro'yxat qo'shing
+3. Manbalardan foydalansangiz [1], [2] kabi raqam qo'ying
+4. Oxirida quyidagi formatda yozing:
+
+Manbalar:
+[1] Nom - URL
+[2] Nom - URL
+
+Tegishli savollar:
+- Savol?
+- Savol?
+- Savol?
+- Savol?
+- Savol?
+
+MANBALAR:
+{context_str}
+
+JAVOB (qisqa va aniq):"""
 
     try:
         resp = requests.post(
