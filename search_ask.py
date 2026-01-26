@@ -168,11 +168,11 @@ def ask_deepseek(question: str, contexts: list[dict]) -> str:
     
     prompt = f"""Siz O'zbekiston qonunchiligini yaxshi biladigan huquqiy yordamchi AI siz.
 
-Quyidagi manbalar asosida savolga javob bering. Faqat manbalarda berilgan ma'lumotlarga tayanib javob bering.
-Agar javob manbalarda bo'lmasa, "Berilgan manbalarda bu haqida ma'lumot topilmadi" deb ayting.
-Javobda tegishli manbalarni ko'rsating [SOURCE N] formatida.
+Quyidagi manbalar va o'zingizning bilimlaringiz asosida savolga aniq javob bering.
+Manbalardan foydalansangiz, [SOURCE N] formatida ko'rsating.
+Javob qisqa va aniq bo'lsin.
 
-MANBALAR:
+MANBALAR (lex.uz dan):
 {context_str}
 
 SAVOL: {question}
