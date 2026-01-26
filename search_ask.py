@@ -325,13 +325,33 @@ def ask_perplexity(question: str) -> str:
 
 
 def search_ask(question: str) -> str:
-    """Main function: try Perplexity first, fallback to DuckDuckGo + scrape + DeepSeek."""
+    """Main function: Local FTS first (cheapest), then Perplexity/Gemini, then DuckDuckGo."""
     
     print(f"\n{'='*60}")
     print(f"SAVOL: {question}")
     print('='*60)
     
-    # Try Gemini with Search Grounding first (Google AI Mode!)
+    # 1. LOCAL FTS - Cheapest (~$0.001/query with DeepSeek)
+    if LEXUZ_LOCAL_FTS_DB and LexUZFTSSearcher is not None:
+        try:
+            print("\n[LOCAL] Searching local LexUZ index (SQLite FTS5)...")
+            searcher = LexUZFTSSearcher(Path(LEXUZ_LOCAL_FTS_DB))
+            hits = searcher.search(question, k=8, per_doc=2, candidate_k=80, with_text=True)
+
+            if hits:
+                # Convert hits -> contexts for DeepSeek.
+                contexts = []
+                for h in hits:
+                    contexts.append({"url": h.url, "content": (h.text or "")[:4000]})
+
+                print(f"\n[LOCAL] Found {len(hits)} chunks, generating answer with DeepSeek...")
+                return ask_deepseek(question, contexts)
+            else:
+                print("[LOCAL] No matches found, trying web search...")
+        except Exception as e:
+            print(f"[LOCAL] Failed ({e}), trying web search...")
+    
+    # 2. GEMINI - Google AI Mode (~$0.0035/query)
     if GEMINI_API_KEY:
         print("\n[GEMINI] Using Google Gemini with Search Grounding...")
         answer = ask_gemini_grounded(question)
@@ -339,33 +359,13 @@ def search_ask(question: str) -> str:
             return answer
         print("[GEMINI] Failed, trying Perplexity...")
     
-    # Try Perplexity second
+    # 3. PERPLEXITY (~$0.006/query)
     if PERPLEXITY_API_KEY:
         print("\n[PERPLEXITY] Using Perplexity API...")
         answer = ask_perplexity(question)
         if answer:
             return answer
         print("[PERPLEXITY] Failed, falling back to DuckDuckGo + DeepSeek...")
-    
-    # Cheap, fast path: local FTS over your downloaded HTML pages (no web search, no scraping).
-    if LEXUZ_LOCAL_FTS_DB and LexUZFTSSearcher is not None:
-        try:
-            print("\n[LOCAL] Searching local LexUZ index (SQLite FTS5)...")
-            searcher = LexUZFTSSearcher(Path(LEXUZ_LOCAL_FTS_DB))
-            hits = searcher.search(question, k=8, per_doc=2, candidate_k=80, with_text=True)
-
-            if not hits:
-                return "Mahalliy bazada mos matn topilmadi. Qidiruv so'zlarini o'zgartirib ko'ring."
-
-            # Convert hits -> contexts for DeepSeek.
-            contexts = []
-            for h in hits:
-                contexts.append({"url": h.url, "content": (h.text or "")[:4000]})
-
-            print("\n[LOCAL] Generating answer with DeepSeek...")
-            return ask_deepseek(question, contexts)
-        except Exception as e:
-            print(f"[LOCAL] Failed ({e}), falling back to web search...")
 
     # Fallback: DuckDuckGo + scrape + DeepSeek (~$0.001/query)
     # 1. Search
