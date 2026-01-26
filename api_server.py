@@ -16,7 +16,7 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse
 
 # Import search_ask function
-from search_ask import search_ask, LEXUZ_LOCAL_FTS_DB, DEEPSEEK_API_KEY, OPENROUTER_API_KEY
+from search_ask import search_ask, ask_gemini_structured, LEXUZ_LOCAL_FTS_DB, DEEPSEEK_API_KEY, OPENROUTER_API_KEY, GEMINI_API_KEY
 
 
 class LexUZHandler(BaseHTTPRequestHandler):
@@ -68,7 +68,23 @@ class LexUZHandler(BaseHTTPRequestHandler):
                 # Get chat history if provided
                 history = data.get("history", [])
                 
-                # Use the new search_ask with history
+                # Check if client wants structured response
+                structured = data.get("structured", False)
+                
+                if structured and GEMINI_API_KEY:
+                    # Return structured response with blocks, sources, relatedQuestions
+                    result = ask_gemini_structured(question, history=history)
+                    if result:
+                        self._send_json({
+                            "question": question,
+                            "structured": True,
+                            "blocks": result.get("blocks", []),
+                            "sources": result.get("sources", []),
+                            "relatedQuestions": result.get("relatedQuestions", [])
+                        })
+                        return
+                
+                # Fallback to legacy string response
                 answer = search_ask(question, history=history)
                 
                 self._send_json({
@@ -79,6 +95,8 @@ class LexUZHandler(BaseHTTPRequestHandler):
             except json.JSONDecodeError:
                 self._send_error("Invalid JSON")
             except Exception as e:
+                import traceback
+                traceback.print_exc()
                 self._send_error(str(e), 500)
         
         else:

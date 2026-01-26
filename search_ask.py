@@ -16,7 +16,7 @@ import time
 from pathlib import Path
 import requests
 from bs4 import BeautifulSoup
-from urllib.parse import quote_plus
+from urllib.parse import quote_plus, urlparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # Optional: local ultra-fast search (SQLite FTS5) over your downloaded lex.uz HTML pages.
@@ -309,8 +309,40 @@ def extract_title_from_url(url: str) -> str:
     return "Lex.uz hujjat"
 
 
-def ask_gemini_grounded(question: str, history: list = None) -> str:
-    """Use Google Gemini with Search Grounding."""
+def extract_domain_label(url: str) -> str:
+    """Extract short label from URL domain (e.g., lex.uz -> lex, xabar.uz -> xabar)."""
+    try:
+        from urllib.parse import urlparse
+        parsed = urlparse(url)
+        host = parsed.netloc.lower()
+        
+        # Remove www. prefix
+        if host.startswith("www."):
+            host = host[4:]
+        
+        # Remove common TLDs
+        tlds = [".uz", ".com", ".ru", ".org", ".net", ".io", ".co", ".info"]
+        for tld in tlds:
+            if host.endswith(tld):
+                host = host[:-len(tld)]
+                break
+        
+        # Remove subdomains - keep only main domain part
+        parts = host.split(".")
+        if len(parts) > 1:
+            host = parts[-1]  # Take last part (main brand)
+        
+        # Truncate if too long
+        if len(host) > 10:
+            host = host[:10]
+        
+        return host or "web"
+    except:
+        return "web"
+
+
+def ask_gemini_structured(question: str, history: list = None) -> dict:
+    """Use Google Gemini with Search Grounding, return structured response."""
     
     if not GEMINI_API_KEY:
         return None
@@ -329,10 +361,12 @@ def ask_gemini_grounded(question: str, history: list = None) -> str:
                     "parts": [{"text": text}]
                 })
     
-    # Add current question with instructions
+    # Add current question with instructions for structured output
     full_question = f"""{question}
 
-O'zbek tilida javob ber. Qisqa va aniq (2-5 jumla). Manbalarga link ber. 5 ta tegishli savol ham ber."""
+MUHIM: Javobni paragraflar bilan yoz. Har bir paragrafdan keyin qaysi manbadan olganingni [1], [2] kabi raqam bilan ko'rsat.
+O'zbek tilida javob ber. Qisqa va aniq (2-4 paragraf).
+Oxirida 5 ta tegishli savol yoz."""
     
     contents.append({
         "role": "user",
@@ -346,6 +380,7 @@ O'zbek tilida javob ber. Qisqa va aniq (2-5 jumla). Manbalarga link ber. 5 ta te
         "gemini-1.5-flash",
     ]
     
+    resp = None
     for model in models:
         try:
             resp = requests.post(
@@ -373,50 +408,199 @@ O'zbek tilida javob ber. Qisqa va aniq (2-5 jumla). Manbalarga link ber. 5 ta te
             print(f"[GEMINI] {model} failed: {e}")
             continue
     else:
-        # All models failed
         return None
     
     try:
-        
         if resp.status_code != 200:
             print(f"[GEMINI] Error: {resp.status_code} - {resp.text[:200]}")
             return None
         
         data = resp.json()
         
-        # Extract answer
-        answer = data["candidates"][0]["content"]["parts"][0]["text"]
+        # Extract answer text
+        answer_text = data["candidates"][0]["content"]["parts"][0]["text"]
         
-        # Extract citations from grounding metadata if not in answer
+        # Extract sources from grounding metadata
         grounding = data["candidates"][0].get("groundingMetadata", {})
         chunks = grounding.get("groundingChunks", [])
         
-        if chunks and "Manbalar:" not in answer:
-            answer += "\n\nManbalar:\n"
-            seen_urls = set()
-            i = 1
-            for chunk in chunks:
-                url = chunk.get("web", {}).get("uri", "")
-                title = chunk.get("web", {}).get("title", "") or extract_title_from_url(url)
-                if url and url not in seen_urls:
-                    seen_urls.add(url)
-                    answer += f"[{i}] {title} - {url}\n"
-                    i += 1
+        # Build sources list
+        sources = []
+        seen_urls = set()
+        source_id = 1
         
-        # Add related questions if not present
-        if "Tegishli savollar:" not in answer:
-            answer += "\n\nTegishli savollar:\n"
-            answer += "- Bu mavzu bo'yicha boshqa qonunlar bormi?\n"
-            answer += "- Qanday jarimalar ko'zda tutilgan?\n"
-            answer += "- Bu qonun qachon kuchga kirgan?\n"
-            answer += "- Istisnolar bormi?\n"
-            answer += "- Amaliyotda qanday qo'llaniladi?\n"
+        for chunk in chunks:
+            url = chunk.get("web", {}).get("uri", "")
+            title = chunk.get("web", {}).get("title", "") or ""
+            
+            if url and url not in seen_urls:
+                seen_urls.add(url)
+                label = extract_domain_label(url)
+                
+                # Try to extract snippet from the chunk
+                snippet = ""
+                if "text" in chunk:
+                    snippet = chunk["text"][:150]
+                
+                sources.append({
+                    "id": source_id,
+                    "url": url,
+                    "domain": urlparse(url).netloc if url else "",
+                    "label": label,
+                    "title": title[:100] if title else f"{label} hujjat",
+                    "snippet": snippet
+                })
+                source_id += 1
         
-        return answer
+        # Parse answer into blocks with citation references
+        blocks = parse_answer_to_blocks(answer_text, sources)
+        
+        # Extract related questions
+        related_questions = extract_related_questions(answer_text)
+        
+        return {
+            "blocks": blocks,
+            "sources": sources,
+            "relatedQuestions": related_questions
+        }
         
     except Exception as e:
         print(f"[GEMINI] Failed: {e}")
+        import traceback
+        traceback.print_exc()
         return None
+
+
+def parse_answer_to_blocks(text: str, sources: list) -> list:
+    """Parse answer text into blocks with source IDs."""
+    blocks = []
+    
+    # Remove related questions section from text
+    text_clean = text
+    for marker in ["Tegishli savollar:", "Related questions:", "Savollar:"]:
+        if marker in text_clean:
+            text_clean = text_clean.split(marker)[0]
+    
+    # Remove sources section if present
+    for marker in ["Manbalar:", "Sources:", "Manba:"]:
+        if marker in text_clean:
+            text_clean = text_clean.split(marker)[0]
+    
+    # Split into paragraphs
+    paragraphs = [p.strip() for p in text_clean.split("\n\n") if p.strip()]
+    
+    # If no double newlines, try single newlines for shorter responses
+    if len(paragraphs) <= 1:
+        paragraphs = [p.strip() for p in text_clean.split("\n") if p.strip() and len(p.strip()) > 20]
+    
+    for para in paragraphs:
+        if not para or len(para) < 10:
+            continue
+            
+        # Find citation references like [1], [2], [3] in this paragraph
+        citation_pattern = r'\[(\d+)\]'
+        found_ids = list(set(int(m) for m in re.findall(citation_pattern, para)))
+        
+        # Filter to only valid source IDs
+        valid_ids = [sid for sid in found_ids if any(s["id"] == sid for s in sources)]
+        
+        # Clean the paragraph text (remove citation markers for cleaner display)
+        clean_text = re.sub(r'\s*\[\d+\]\s*', ' ', para).strip()
+        clean_text = re.sub(r'\s+', ' ', clean_text)
+        
+        if clean_text:
+            blocks.append({
+                "text": clean_text,
+                "sourceIds": valid_ids if valid_ids else []
+            })
+    
+    # If no blocks created, create one from the whole text
+    if not blocks and text_clean.strip():
+        all_ids = list(set(int(m) for m in re.findall(r'\[(\d+)\]', text_clean)))
+        valid_ids = [sid for sid in all_ids if any(s["id"] == sid for s in sources)]
+        clean_text = re.sub(r'\s*\[\d+\]\s*', ' ', text_clean).strip()
+        blocks.append({
+            "text": clean_text,
+            "sourceIds": valid_ids if valid_ids else ([1] if sources else [])
+        })
+    
+    return blocks
+
+
+def extract_related_questions(text: str) -> list:
+    """Extract related questions from answer text."""
+    questions = []
+    
+    # Find the related questions section
+    markers = ["Tegishli savollar:", "Related questions:", "Savollar:", "Qo'shimcha savollar:"]
+    section_text = ""
+    
+    for marker in markers:
+        if marker.lower() in text.lower():
+            idx = text.lower().find(marker.lower())
+            section_text = text[idx + len(marker):]
+            break
+    
+    if section_text:
+        # Extract questions (lines starting with -, *, or numbers)
+        lines = section_text.split("\n")
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            # Remove bullet points and numbers
+            clean = re.sub(r'^[-•*\d.)\]]+\s*', '', line).strip()
+            clean = clean.replace('**', '').strip()
+            if clean and len(clean) > 5 and clean.endswith('?'):
+                questions.append(clean)
+            if len(questions) >= 6:
+                break
+    
+    # Default questions if none found
+    if not questions:
+        questions = [
+            "Bu mavzu bo'yicha boshqa qonunlar bormi?",
+            "Qanday jarimalar ko'zda tutilgan?",
+            "Bu qonun qachon kuchga kirgan?",
+            "Istisnolar bormi?",
+            "Amaliyotda qanday qo'llaniladi?"
+        ]
+    
+    return questions
+
+
+def ask_gemini_grounded(question: str, history: list = None) -> str:
+    """Use Google Gemini with Search Grounding (legacy string response)."""
+    result = ask_gemini_structured(question, history)
+    if not result:
+        return None
+    
+    # Convert structured response back to string for backward compatibility
+    answer_parts = []
+    for block in result.get("blocks", []):
+        text = block.get("text", "")
+        source_ids = block.get("sourceIds", [])
+        if source_ids:
+            text += " " + " ".join(f"[{sid}]" for sid in source_ids)
+        answer_parts.append(text)
+    
+    answer = "\n\n".join(answer_parts)
+    
+    # Add sources
+    sources = result.get("sources", [])
+    if sources:
+        answer += "\n\nManbalar:\n"
+        for s in sources:
+            answer += f"[{s['id']}] {s['title']} - {s['url']}\n"
+    
+    # Add related questions
+    questions = result.get("relatedQuestions", [])
+    if questions:
+        answer += "\n\nTegishli savollar:\n"
+        for q in questions:
+            answer += f"- {q}\n"
+    
+    return answer
 
 
 def ask_perplexity(question: str) -> str:
