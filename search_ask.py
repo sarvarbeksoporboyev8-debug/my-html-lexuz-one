@@ -12,6 +12,7 @@ import os
 import sys
 import json
 import re
+import time
 from pathlib import Path
 import requests
 from bs4 import BeautifulSoup
@@ -309,7 +310,7 @@ def extract_title_from_url(url: str) -> str:
 
 
 def ask_gemini_grounded(question: str, history: list = None) -> str:
-    """Use Google Gemini with Search Grounding - THIS IS GOOGLE AI MODE!"""
+    """Use Google Gemini with Search Grounding."""
     
     if not GEMINI_API_KEY:
         return None
@@ -338,19 +339,44 @@ O'zbek tilida javob ber. Qisqa va aniq (2-5 jumla). Manbalarga link ber. 5 ta te
         "parts": [{"text": full_question}]
     })
     
+    # Try multiple models in case of rate limits
+    models = [
+        "gemini-2.0-flash",
+        "gemini-2.0-flash-lite",
+        "gemini-1.5-flash",
+    ]
+    
+    for model in models:
+        try:
+            resp = requests.post(
+                f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
+                headers={"Content-Type": "application/json"},
+                params={"key": GEMINI_API_KEY},
+                json={
+                    "contents": contents,
+                    "tools": [
+                        {"google_search": {}}
+                    ]
+                },
+                timeout=30,
+            )
+            
+            if resp.status_code == 429:
+                print(f"[GEMINI] {model} rate limited, trying next model...")
+                time.sleep(1)
+                continue
+            
+            if resp.status_code == 200:
+                break
+                
+        except Exception as e:
+            print(f"[GEMINI] {model} failed: {e}")
+            continue
+    else:
+        # All models failed
+        return None
+    
     try:
-        resp = requests.post(
-            f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent",
-            headers={"Content-Type": "application/json"},
-            params={"key": GEMINI_API_KEY},
-            json={
-                "contents": contents,
-                "tools": [
-                    {"google_search": {}}
-                ]
-            },
-            timeout=30,
-        )
         
         if resp.status_code != 200:
             print(f"[GEMINI] Error: {resp.status_code} - {resp.text[:200]}")
