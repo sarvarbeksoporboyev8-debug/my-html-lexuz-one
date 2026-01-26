@@ -164,9 +164,11 @@ def ask_llm(question: str, contexts: list[dict]) -> str:
     """Send question + contexts to LLM (OpenRouter/Gemma or DeepSeek)."""
     
     # Build context string
+    # Limit content per chunk to fit in context window (Gemma has 8K limit)
+    max_chars_per_chunk = 1500 if OPENROUTER_API_KEY else 3000
     context_parts = []
     for i, ctx in enumerate(contexts, 1):
-        context_parts.append(f"[SOURCE {i}] {ctx['url']}\n{ctx['content'][:3000]}")
+        context_parts.append(f"[SOURCE {i}] {ctx['url']}\n{ctx['content'][:max_chars_per_chunk]}")
     
     context_str = "\n\n---\n\n".join(context_parts)
     
