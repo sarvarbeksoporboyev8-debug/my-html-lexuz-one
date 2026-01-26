@@ -34,9 +34,8 @@ def normalize_text(s: str) -> str:
 def build_match_query(user_query: str) -> str:
     """Turn a user query into a safer FTS MATCH string.
 
-    We do 2 things:
-      1) normalize apostrophes the same way as indexing
-      2) add prefix '*' for longer alphabetic tokens, so inflections still match
+    Keep it simple - just normalize and return tokens without wildcards.
+    FTS5 handles stemming/matching well on its own.
     """
     q = normalize_text(user_query)
     q = re.sub(r"[^0-9A-Za-zА-Яа-яЁёЎўҚқҒғҲҳ\s]", " ", q)
@@ -46,18 +45,8 @@ def build_match_query(user_query: str) -> str:
     if not tokens:
         return ""
 
-    out = []
-    for t in tokens:
-        # Keep numbers exact.
-        if t.isdigit() or re.fullmatch(r"-?\d+", t):
-            out.append(t)
-            continue
-        # Prefix matching for longer tokens.
-        if len(t) >= 4:
-            out.append(t + "*")
-        else:
-            out.append(t)
-    return " ".join(out)
+    # Just return tokens as-is, no wildcards
+    return " ".join(tokens)
 
 
 @dataclass
