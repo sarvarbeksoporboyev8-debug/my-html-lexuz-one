@@ -316,7 +316,7 @@ def ask_gemini_grounded(question: str) -> str:
     
     full_question = f"""{question}
 
-O'zbek tilida javob ber. Qisqa va aniq javob ber (2-5 jumla). Oxirida manbalar va 5 ta tegishli savol qo'sh."""
+O'zbek tilida javob ber. Qisqa va aniq javob ber (2-5 jumla). Manbalar va 5 ta tegishli savol ham ber."""
     
     try:
         resp = requests.post(
