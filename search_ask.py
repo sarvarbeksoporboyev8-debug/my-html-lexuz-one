@@ -433,7 +433,11 @@ Oxirida 5 ta tegishli savol yoz."""
             url = chunk.get("web", {}).get("uri", "")
             title = chunk.get("web", {}).get("title", "") or ""
             
-            if url and url not in seen_urls:
+            # Skip Google URLs - we want actual sources, not search results
+            if not url or "google.com" in url.lower() or "googleapis.com" in url.lower():
+                continue
+            
+            if url not in seen_urls:
                 seen_urls.add(url)
                 label = extract_domain_label(url)
                 
