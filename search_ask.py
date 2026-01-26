@@ -32,7 +32,11 @@ if LEXUZ_LOCAL_FTS_DB:
     except Exception:
         LexUZFTSSearcher = None
 
-# Config
+# Config - LLM provider (OpenRouter or DeepSeek)
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
+OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "google/gemma-2-9b-it")
+OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "")
 DEEPSEEK_MODEL = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
 DEEPSEEK_BASE_URL = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1")
@@ -156,8 +160,8 @@ def scrape_all(urls: list[str], max_chars_per_page: int = 4000) -> list[dict]:
     return results
 
 
-def ask_deepseek(question: str, contexts: list[dict]) -> str:
-    """Send question + contexts to DeepSeek."""
+def ask_llm(question: str, contexts: list[dict]) -> str:
+    """Send question + contexts to LLM (OpenRouter/Gemma or DeepSeek)."""
     
     # Build context string
     context_parts = []
@@ -183,15 +187,34 @@ SAVOL: {question}
 
 JAVOB:"""
 
+    # Choose provider: OpenRouter (Gemma) or DeepSeek
+    if OPENROUTER_API_KEY:
+        api_url = f"{OPENROUTER_BASE_URL}/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+            "Content-Type": "application/json",
+            "HTTP-Referer": "https://lexai.uz",
+            "X-Title": "LexAI",
+        }
+        model = OPENROUTER_MODEL
+        provider = "OpenRouter"
+    elif DEEPSEEK_API_KEY:
+        api_url = f"{DEEPSEEK_BASE_URL}/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
+            "Content-Type": "application/json",
+        }
+        model = DEEPSEEK_MODEL
+        provider = "DeepSeek"
+    else:
+        return "LLM API kaliti topilmadi. OPENROUTER_API_KEY yoki DEEPSEEK_API_KEY o'rnating."
+
     try:
         resp = requests.post(
-            f"{DEEPSEEK_BASE_URL}/chat/completions",
-            headers={
-                "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
-                "Content-Type": "application/json",
-            },
+            api_url,
+            headers=headers,
             json={
-                "model": DEEPSEEK_MODEL,
+                "model": model,
                 "messages": [{"role": "user", "content": prompt}],
                 "temperature": 0.3,
                 "max_tokens": 1500,
@@ -200,7 +223,7 @@ JAVOB:"""
         )
         
         if resp.status_code != 200:
-            return f"DeepSeek API error: {resp.status_code} - {resp.text[:200]}"
+            return f"{provider} API error: {resp.status_code} - {resp.text[:200]}"
         
         data = resp.json()
         answer = data["choices"][0]["message"]["content"]
@@ -348,8 +371,9 @@ def search_ask(question: str) -> str:
                 for h in hits:
                     contexts.append({"url": h.url, "content": (h.text or "")[:4000]})
 
-                print(f"\n[LOCAL] Found {len(hits)} chunks, generating answer with DeepSeek...")
-                return ask_deepseek(question, contexts)
+                llm_name = "Gemma" if OPENROUTER_API_KEY else "DeepSeek"
+                print(f"\n[LOCAL] Found {len(hits)} chunks, generating answer with {llm_name}...")
+                return ask_llm(question, contexts)
             else:
                 print("[LOCAL] No matches found, trying web search...")
         except Exception as e:
@@ -389,7 +413,7 @@ def search_ask(question: str) -> str:
 
     # 3. Ask LLM
     print("\n[3/3] Generating answer...")
-    return ask_deepseek(question, contexts)
+    return ask_llm(question, contexts)
 
 
 def main():
