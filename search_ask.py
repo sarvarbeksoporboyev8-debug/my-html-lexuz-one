@@ -166,11 +166,25 @@ def tidy_question(question: str) -> str:
     if not OPENROUTER_API_KEY:
         return question  # No Gemma, return as-is
     
-    prompt = f"""Quyidagi savolni toza, aniq qilib yozing. Faqat savolni qaytaring, boshqa hech narsa yozmang.
+    prompt = f"""Siz savol tozalovchi yordamchisiz. Foydalanuvchi savolini to'g'ri o'zbek tilida qayta yozing.
 
-Savol: {question}
+VAZIFA:
+- Imlo xatolarini tuzating
+- Grammatikani to'g'rilang  
+- Qisqartmalarni to'liq yozing (QQS = Qo'shilgan qiymat solig'i)
+- Savol tushunarli va aniq bo'lsin
+- FAQAT savolni qaytaring, boshqa hech narsa yozmang
 
-Toza savol:"""
+MISOL:
+Kirish: "qqsni nechchi foiz toliman kerak bilasizmi"
+Chiqish: "Qo'shilgan qiymat solig'i (QQS) necha foiz to'lanadi?"
+
+MISOL:
+Kirish: "mashina olsam qancha soliq toliman"
+Chiqish: "Avtomobil sotib olsam qancha soliq to'lashim kerak?"
+
+Kirish: {question}
+Chiqish:"""
 
     try:
         resp = requests.post(
