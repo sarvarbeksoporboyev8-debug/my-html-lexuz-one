@@ -34,8 +34,8 @@ def normalize_text(s: str) -> str:
 def build_match_query(user_query: str) -> str:
     """Turn a user query into a safer FTS MATCH string.
 
-    Keep it simple - just normalize and return tokens without wildcards.
-    FTS5 handles stemming/matching well on its own.
+    Uses OR logic so chunks matching ANY word are returned.
+    BM25 ranking will push chunks with more matches to the top.
     """
     q = normalize_text(user_query)
     q = re.sub(r"[^0-9A-Za-zА-Яа-яЁёЎўҚқҒғҲҳ\s]", " ", q)
@@ -45,8 +45,9 @@ def build_match_query(user_query: str) -> str:
     if not tokens:
         return ""
 
-    # Just return tokens as-is, no wildcards
-    return " ".join(tokens)
+    # Use OR so any matching word returns results
+    # BM25 will rank chunks with more matches higher
+    return " OR ".join(tokens)
 
 
 @dataclass
