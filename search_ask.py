@@ -160,15 +160,55 @@ def scrape_all(urls: list[str], max_chars_per_page: int = 4000) -> list[dict]:
     return results
 
 
+def tidy_question(question: str) -> str:
+    """Use Gemma (cheap) to clean up messy questions."""
+    
+    if not OPENROUTER_API_KEY:
+        return question  # No Gemma, return as-is
+    
+    prompt = f"""Quyidagi savolni toza, aniq qilib yozing. Faqat savolni qaytaring, boshqa hech narsa yozmang.
+
+Savol: {question}
+
+Toza savol:"""
+
+    try:
+        resp = requests.post(
+            f"{OPENROUTER_BASE_URL}/chat/completions",
+            headers={
+                "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": OPENROUTER_MODEL,
+                "messages": [{"role": "user", "content": prompt}],
+                "temperature": 0.1,
+                "max_tokens": 100,
+            },
+            timeout=30,
+        )
+        
+        if resp.status_code == 200:
+            data = resp.json()
+            tidied = data["choices"][0]["message"]["content"].strip()
+            if tidied:
+                return tidied
+    except Exception:
+        pass
+    
+    return question  # Fallback to original
+
+
 def ask_llm(question: str, contexts: list[dict]) -> str:
-    """Send question + contexts to LLM (OpenRouter/Gemma or DeepSeek)."""
+    """Send question + contexts to DeepSeek (accurate for legal answers)."""
+    
+    if not DEEPSEEK_API_KEY:
+        return "DEEPSEEK_API_KEY topilmadi."
     
     # Build context string
-    # Limit content per chunk to fit in context window (Gemma has 8K limit)
-    max_chars_per_chunk = 1500 if OPENROUTER_API_KEY else 3000
     context_parts = []
     for i, ctx in enumerate(contexts, 1):
-        context_parts.append(f"[SOURCE {i}] {ctx['url']}\n{ctx['content'][:max_chars_per_chunk]}")
+        context_parts.append(f"[SOURCE {i}] {ctx['url']}\n{ctx['content'][:3000]}")
     
     context_str = "\n\n---\n\n".join(context_parts)
     
@@ -189,34 +229,15 @@ SAVOL: {question}
 
 JAVOB:"""
 
-    # Choose provider: OpenRouter (Gemma) or DeepSeek
-    if OPENROUTER_API_KEY:
-        api_url = f"{OPENROUTER_BASE_URL}/chat/completions"
-        headers = {
-            "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-            "Content-Type": "application/json",
-            "HTTP-Referer": "https://lexai.uz",
-            "X-Title": "LexAI",
-        }
-        model = OPENROUTER_MODEL
-        provider = "OpenRouter"
-    elif DEEPSEEK_API_KEY:
-        api_url = f"{DEEPSEEK_BASE_URL}/chat/completions"
-        headers = {
-            "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
-            "Content-Type": "application/json",
-        }
-        model = DEEPSEEK_MODEL
-        provider = "DeepSeek"
-    else:
-        return "LLM API kaliti topilmadi. OPENROUTER_API_KEY yoki DEEPSEEK_API_KEY o'rnating."
-
     try:
         resp = requests.post(
-            api_url,
-            headers=headers,
+            f"{DEEPSEEK_BASE_URL}/chat/completions",
+            headers={
+                "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
+                "Content-Type": "application/json",
+            },
             json={
-                "model": model,
+                "model": DEEPSEEK_MODEL,
                 "messages": [{"role": "user", "content": prompt}],
                 "temperature": 0.3,
                 "max_tokens": 1500,
@@ -225,7 +246,7 @@ JAVOB:"""
         )
         
         if resp.status_code != 200:
-            return f"{provider} API error: {resp.status_code} - {resp.text[:200]}"
+            return f"DeepSeek API error: {resp.status_code} - {resp.text[:200]}"
         
         data = resp.json()
         answer = data["choices"][0]["message"]["content"]
@@ -360,6 +381,12 @@ def search_ask(question: str) -> str:
     print(f"SAVOL: {question}")
     print('='*60)
     
+    # Tidy up the question first (Gemma - cheap)
+    if OPENROUTER_API_KEY:
+        print("\n[TIDY] Cleaning up question with Gemma...")
+        question = tidy_question(question)
+        print(f"[TIDY] Tidied: {question}")
+    
     # 1. LOCAL FTS - Cheapest (~$0.001/query with DeepSeek)
     if LEXUZ_LOCAL_FTS_DB and LexUZFTSSearcher is not None:
         try:
@@ -373,8 +400,7 @@ def search_ask(question: str) -> str:
                 for h in hits:
                     contexts.append({"url": h.url, "content": (h.text or "")[:4000]})
 
-                llm_name = "Gemma" if OPENROUTER_API_KEY else "DeepSeek"
-                print(f"\n[LOCAL] Found {len(hits)} chunks, generating answer with {llm_name}...")
+                print(f"\n[LOCAL] Found {len(hits)} chunks, generating answer with DeepSeek...")
                 return ask_llm(question, contexts)
             else:
                 print("[LOCAL] No matches found, trying web search...")
