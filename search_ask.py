@@ -217,6 +217,7 @@ def ask_llm(question: str, contexts: list[dict]) -> str:
 Quyidagi manbalar va o'zingizning bilimlaringiz asosida savolga javob bering.
 
 QOIDALAR:
+- Tabiiy, ravon o'zbek tilida javob yozing
 - O'zingizning bilimlaringizga ishoning - siz 2025-yilgacha bo'lgan qonunlarni bilasiz
 - Agar manbalar eskirgan bo'lsa, yangi bilimlaringizga tayanib javob bering
 - Manbalardan foydalansangiz, [SOURCE N] formatida ko'rsating
