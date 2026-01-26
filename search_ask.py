@@ -168,20 +168,22 @@ def ask_deepseek(question: str, contexts: list[dict]) -> str:
     
     prompt = f"""Siz O'zbekiston qonunchiligini yaxshi biladigan huquqiy yordamchi AI siz.
 
-Quyidagi manbalar va o'zingizning bilimlaringiz asosida savolga aniq javob bering.
+Savolga o'zingizning bilimlaringiz asosida ANIQ javob bering. Quyidagi manbalar qo'shimcha ma'lumot sifatida berilgan.
 
-MUHIM QOIDALAR:
-- Agar manbalar eskirgan bo'lsa (masalan, eski kodeks versiyasi), o'zingizning YANGI bilimlaringizga tayanib javob bering
-- 2023-yilda Mehnat kodeksi yangilangan, 2019-yilda Soliq kodeksi yangilangan - shu kabi o'zgarishlarni hisobga oling
-- Manbalardan foydalansangiz, [SOURCE N] formatida ko'rsating
-- Javob qisqa va aniq bo'lsin
+MUHIM:
+- O'zingizning bilimlaringizga ishoning - siz 2025-yilgacha bo'lgan qonunlarni bilasiz
+- Manbalar to'liq bo'lmasligi yoki eskirgan bo'lishi mumkin
+- 2022-yilda yangi Mehnat kodeksi qabul qilindi (yillik ta'til 21 kalendar kun)
+- 2019-yilda yangi Soliq kodeksi qabul qilindi (QQS 12%)
+- Agar manbalardan foydalansangiz, [SOURCE N] ko'rsating
+- Javob QISQA va ANIQ bo'lsin - ortiqcha tushuntirish shart emas
 
-MANBALAR (lex.uz dan):
+QO'SHIMCHA MANBALAR (lex.uz):
 {context_str}
 
 SAVOL: {question}
 
-JAVOB (o'zbek tilida):"""
+JAVOB:"""
 
     try:
         resp = requests.post(
