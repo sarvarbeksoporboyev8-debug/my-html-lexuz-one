@@ -465,39 +465,13 @@ Tegishli savollar:
 
 
 def search_ask(question: str) -> str:
-    """Main function: Local FTS first (cheapest), then Perplexity/Gemini, then DuckDuckGo."""
+    """Main function: Gemini first (best), then Perplexity, then DuckDuckGo + DeepSeek."""
     
     print(f"\n{'='*60}")
     print(f"SAVOL: {question}")
     print('='*60)
     
-    # Tidy up the question first (Gemma - cheap)
-    if OPENROUTER_API_KEY:
-        print("\n[TIDY] Cleaning up question with Gemma...")
-        question = tidy_question(question)
-        print(f"[TIDY] Tidied: {question}")
-    
-    # 1. LOCAL FTS - Cheapest (~$0.001/query with DeepSeek)
-    if LEXUZ_LOCAL_FTS_DB and LexUZFTSSearcher is not None:
-        try:
-            print("\n[LOCAL] Searching local LexUZ index (SQLite FTS5)...")
-            searcher = LexUZFTSSearcher(Path(LEXUZ_LOCAL_FTS_DB))
-            hits = searcher.search(question, k=8, per_doc=2, candidate_k=80, with_text=True)
-
-            if hits:
-                # Convert hits -> contexts for DeepSeek.
-                contexts = []
-                for h in hits:
-                    contexts.append({"url": h.url, "content": (h.text or "")[:4000]})
-
-                print(f"\n[LOCAL] Found {len(hits)} chunks, generating answer with DeepSeek...")
-                return ask_llm(question, contexts)
-            else:
-                print("[LOCAL] No matches found, trying web search...")
-        except Exception as e:
-            print(f"[LOCAL] Failed ({e}), trying web search...")
-    
-    # 2. GEMINI - Google AI Mode (~$0.0035/query)
+    # 1. GEMINI - Primary choice (cheap + has web search)
     if GEMINI_API_KEY:
         print("\n[GEMINI] Using Google Gemini with Search Grounding...")
         answer = ask_gemini_grounded(question)
@@ -505,7 +479,7 @@ def search_ask(question: str) -> str:
             return answer
         print("[GEMINI] Failed, trying Perplexity...")
     
-    # 3. PERPLEXITY (~$0.006/query)
+    # 2. PERPLEXITY - Backup
     if PERPLEXITY_API_KEY:
         print("\n[PERPLEXITY] Using Perplexity API...")
         answer = ask_perplexity(question)
@@ -513,15 +487,30 @@ def search_ask(question: str) -> str:
             return answer
         print("[PERPLEXITY] Failed, falling back to DuckDuckGo + DeepSeek...")
 
-    # Fallback: DuckDuckGo + scrape + DeepSeek (~$0.001/query)
-    # 1. Search
-    print("\n[1/3] Searching...")
+    # 3. LOCAL FTS + DeepSeek - Fallback
+    if LEXUZ_LOCAL_FTS_DB and LexUZFTSSearcher is not None:
+        try:
+            print("\n[LOCAL] Searching local LexUZ index...")
+            searcher = LexUZFTSSearcher(Path(LEXUZ_LOCAL_FTS_DB))
+            hits = searcher.search(question, k=8, per_doc=2, candidate_k=80, with_text=True)
+
+            if hits:
+                contexts = []
+                for h in hits:
+                    contexts.append({"url": h.url, "content": (h.text or "")[:4000]})
+
+                print(f"\n[LOCAL] Found {len(hits)} chunks, generating answer with DeepSeek...")
+                return ask_llm(question, contexts)
+        except Exception as e:
+            print(f"[LOCAL] Failed ({e})")
+
+    # 4. DuckDuckGo + scrape + DeepSeek - Last resort
+    print("\n[1/3] Searching DuckDuckGo...")
     results = search_duckduckgo(question, num_results=5)
 
     if not results:
         return "Qidiruv natijalari topilmadi. Internetga ulanishni tekshiring."
 
-    # 2. Scrape
     print("\n[2/3] Scraping pages...")
     urls = [r["url"] for r in results]
     contexts = scrape_all(urls)
@@ -529,7 +518,6 @@ def search_ask(question: str) -> str:
     if not contexts:
         return "Sahifalarni o'qib bo'lmadi."
 
-    # 3. Ask LLM
     print("\n[3/3] Generating answer...")
     return ask_llm(question, contexts)
 
