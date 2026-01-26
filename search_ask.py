@@ -219,10 +219,10 @@ def ask_llm(question: str, contexts: list[dict]) -> str:
     if not DEEPSEEK_API_KEY:
         return "DEEPSEEK_API_KEY topilmadi."
     
-    # Build context string
+    # Build context string with source numbers
     context_parts = []
     for i, ctx in enumerate(contexts, 1):
-        context_parts.append(f"[SOURCE {i}] {ctx['url']}\n{ctx['content'][:3000]}")
+        context_parts.append(f"[{i}] {ctx['url']}\n{ctx['content'][:3000]}")
     
     context_str = "\n\n---\n\n".join(context_parts)
     
@@ -231,11 +231,21 @@ def ask_llm(question: str, contexts: list[dict]) -> str:
 Quyidagi manbalar va o'zingizning bilimlaringiz asosida savolga javob bering.
 
 QOIDALAR:
-- Tabiiy, ravon o'zbek tilida javob yozing
-- O'zingizning bilimlaringizga ishoning - siz 2025-yilgacha bo'lgan qonunlarni bilasiz
-- Agar manbalar eskirgan bo'lsa, yangi bilimlaringizga tayanib javob bering
-- Manbalardan foydalansangiz, [SOURCE N] formatida ko'rsating
-- Javob qisqa va aniq bo'lsin
+1. Tabiiy, ravon o'zbek tilida javob yozing
+2. Javobda manbalardan foydalansangiz, [1], [2] kabi raqamlar bilan ko'rsating
+3. Javob qisqa va aniq bo'lsin
+4. Javob oxirida ALBATTA quyidagi formatda yozing:
+
+Manbalar:
+[1] Manba nomi - URL
+[2] Manba nomi - URL
+
+Tegishli savollar:
+- Birinchi tegishli savol?
+- Ikkinchi tegishli savol?
+- Uchinchi tegishli savol?
+- To'rtinchi tegishli savol?
+- Beshinchi tegishli savol?
 
 MANBALAR (lex.uz):
 {context_str}
@@ -255,7 +265,7 @@ JAVOB:"""
                 "model": DEEPSEEK_MODEL,
                 "messages": [{"role": "user", "content": prompt}],
                 "temperature": 0.3,
-                "max_tokens": 1500,
+                "max_tokens": 2000,
             },
             timeout=60,
         )
@@ -266,15 +276,38 @@ JAVOB:"""
         data = resp.json()
         answer = data["choices"][0]["message"]["content"]
         
-        # Add sources
-        answer += "\n\n**Manbalar:**\n"
-        for i, ctx in enumerate(contexts, 1):
-            answer += f"{i}. {ctx['url']}\n"
+        # Check if sources section exists, if not add it
+        if "Manbalar:" not in answer:
+            answer += "\n\nManbalar:\n"
+            for i, ctx in enumerate(contexts, 1):
+                # Extract title from URL or use generic
+                title = extract_title_from_url(ctx['url'])
+                answer += f"[{i}] {title} - {ctx['url']}\n"
+        
+        # Check if related questions exist, if not add generic ones
+        if "Tegishli savollar:" not in answer:
+            answer += "\n\nTegishli savollar:\n"
+            answer += "- Bu mavzu bo'yicha boshqa qonunlar bormi?\n"
+            answer += "- Qanday jarimalar ko'zda tutilgan?\n"
+            answer += "- Bu qonun qachon kuchga kirgan?\n"
+            answer += "- Istisnolar bormi?\n"
+            answer += "- Amaliyotda qanday qo'llaniladi?\n"
         
         return answer
         
     except Exception as e:
         return f"DeepSeek error: {e}"
+
+
+def extract_title_from_url(url: str) -> str:
+    """Extract a readable title from lex.uz URL."""
+    # Try to get doc ID from URL
+    import re
+    match = re.search(r'/docs/(-?\d+)', url)
+    if match:
+        doc_id = match.group(1)
+        return f"Lex.uz hujjat #{doc_id}"
+    return "Lex.uz hujjat"
 
 
 def ask_gemini_grounded(question: str) -> str:
@@ -283,7 +316,20 @@ def ask_gemini_grounded(question: str) -> str:
     if not GEMINI_API_KEY:
         return None
     
-    full_question = f"O'zbekiston qonunchiligi haqida savol (lex.uz saytidan ma'lumot izla): {question}"
+    full_question = f"""O'zbekiston qonunchiligi haqida savol (lex.uz saytidan ma'lumot izla): {question}
+
+Javob oxirida ALBATTA quyidagi formatda yozing:
+
+Manbalar:
+[1] Manba nomi - URL
+[2] Manba nomi - URL
+
+Tegishli savollar:
+- Birinchi tegishli savol?
+- Ikkinchi tegishli savol?
+- Uchinchi tegishli savol?
+- To'rtinchi tegishli savol?
+- Beshinchi tegishli savol?"""
     
     try:
         resp = requests.post(
@@ -312,19 +358,30 @@ def ask_gemini_grounded(question: str) -> str:
         # Extract answer
         answer = data["candidates"][0]["content"]["parts"][0]["text"]
         
-        # Extract citations from grounding metadata
+        # Extract citations from grounding metadata if not in answer
         grounding = data["candidates"][0].get("groundingMetadata", {})
         chunks = grounding.get("groundingChunks", [])
         
-        if chunks:
-            answer += "\n\n**Manbalar:**\n"
+        if chunks and "Manbalar:" not in answer:
+            answer += "\n\nManbalar:\n"
             seen_urls = set()
-            for i, chunk in enumerate(chunks, 1):
+            i = 1
+            for chunk in chunks:
                 url = chunk.get("web", {}).get("uri", "")
-                title = chunk.get("web", {}).get("title", "")
+                title = chunk.get("web", {}).get("title", "") or extract_title_from_url(url)
                 if url and url not in seen_urls:
                     seen_urls.add(url)
-                    answer += f"{i}. {url}\n"
+                    answer += f"[{i}] {title} - {url}\n"
+                    i += 1
+        
+        # Add related questions if not present
+        if "Tegishli savollar:" not in answer:
+            answer += "\n\nTegishli savollar:\n"
+            answer += "- Bu mavzu bo'yicha boshqa qonunlar bormi?\n"
+            answer += "- Qanday jarimalar ko'zda tutilgan?\n"
+            answer += "- Bu qonun qachon kuchga kirgan?\n"
+            answer += "- Istisnolar bormi?\n"
+            answer += "- Amaliyotda qanday qo'llaniladi?\n"
         
         return answer
         
@@ -342,6 +399,24 @@ def ask_perplexity(question: str) -> str:
     # Add context to focus on Uzbek law
     full_question = f"O'zbekiston qonunchiligi bo'yicha savol (lex.uz saytidan ma'lumot): {question}"
     
+    system_prompt = """Siz O'zbekiston huquqiy masalalari bo'yicha yordamchi AI siz.
+
+QOIDALAR:
+1. Javoblarni o'zbek tilida, aniq va qisqa bering
+2. Manbalardan foydalansangiz [1], [2] kabi raqamlar bilan ko'rsating
+3. Javob oxirida ALBATTA quyidagi formatda yozing:
+
+Manbalar:
+[1] Manba nomi - URL
+[2] Manba nomi - URL
+
+Tegishli savollar:
+- Birinchi tegishli savol?
+- Ikkinchi tegishli savol?
+- Uchinchi tegishli savol?
+- To'rtinchi tegishli savol?
+- Beshinchi tegishli savol?"""
+    
     try:
         resp = requests.post(
             "https://api.perplexity.ai/chat/completions",
@@ -350,18 +425,12 @@ def ask_perplexity(question: str) -> str:
                 "Content-Type": "application/json",
             },
             json={
-                "model": "sonar",  # or "sonar-pro" for better quality
+                "model": "sonar",
                 "messages": [
-                    {
-                        "role": "system",
-                        "content": "Siz O'zbekiston huquqiy masalalari bo'yicha yordamchi AI siz. Javoblarni o'zbek tilida, aniq va qisqa bering. Manbalarni ko'rsating."
-                    },
-                    {
-                        "role": "user", 
-                        "content": full_question
-                    }
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": full_question}
                 ],
-                "search_domain_filter": ["lex.uz"],  # Focus on lex.uz
+                "search_domain_filter": ["lex.uz"],
                 "return_citations": True,
                 "search_recency_filter": "year",
             },
@@ -375,12 +444,22 @@ def ask_perplexity(question: str) -> str:
         data = resp.json()
         answer = data["choices"][0]["message"]["content"]
         
-        # Add citations if available
+        # Add citations if not already in answer
         citations = data.get("citations", [])
-        if citations:
-            answer += "\n\n**Manbalar:**\n"
+        if citations and "Manbalar:" not in answer:
+            answer += "\n\nManbalar:\n"
             for i, url in enumerate(citations, 1):
-                answer += f"{i}. {url}\n"
+                title = extract_title_from_url(url)
+                answer += f"[{i}] {title} - {url}\n"
+        
+        # Add related questions if not present
+        if "Tegishli savollar:" not in answer:
+            answer += "\n\nTegishli savollar:\n"
+            answer += "- Bu mavzu bo'yicha boshqa qonunlar bormi?\n"
+            answer += "- Qanday jarimalar ko'zda tutilgan?\n"
+            answer += "- Bu qonun qachon kuchga kirgan?\n"
+            answer += "- Istisnolar bormi?\n"
+            answer += "- Amaliyotda qanday qo'llaniladi?\n"
         
         return answer
         
