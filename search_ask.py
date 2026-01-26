@@ -424,8 +424,8 @@ Oxirida 5 ta tegishli savol yoz."""
         grounding = data["candidates"][0].get("groundingMetadata", {})
         chunks = grounding.get("groundingChunks", [])
         
-        # Build sources list
-        sources = []
+        # Build sources dict (id -> source object)
+        sources = {}
         seen_urls = set()
         source_id = 1
         
@@ -433,11 +433,7 @@ Oxirida 5 ta tegishli savol yoz."""
             url = chunk.get("web", {}).get("uri", "")
             title = chunk.get("web", {}).get("title", "") or ""
             
-            # Skip Google URLs - we want actual sources, not search results
-            if not url or "google.com" in url.lower() or "googleapis.com" in url.lower():
-                continue
-            
-            if url not in seen_urls:
+            if url and url not in seen_urls:
                 seen_urls.add(url)
                 label = extract_domain_label(url)
                 
@@ -446,18 +442,18 @@ Oxirida 5 ta tegishli savol yoz."""
                 if "text" in chunk:
                     snippet = chunk["text"][:150]
                 
-                sources.append({
+                sources[str(source_id)] = {
                     "id": source_id,
                     "url": url,
                     "domain": urlparse(url).netloc if url else "",
                     "label": label,
                     "title": title[:100] if title else f"{label} hujjat",
                     "snippet": snippet
-                })
+                }
                 source_id += 1
         
-        # Parse answer into blocks with citation references
-        blocks = parse_answer_to_blocks(answer_text, sources)
+        # Parse answer into blocks with anchorSources (ordered by relevance)
+        blocks = parse_answer_to_blocks_v2(answer_text, sources)
         
         # Extract related questions
         related_questions = extract_related_questions(answer_text)
@@ -475,8 +471,81 @@ Oxirida 5 ta tegishli savol yoz."""
         return None
 
 
+def parse_answer_to_blocks_v2(text: str, sources: dict) -> list:
+    """Parse answer text into blocks with anchorSources (Perplexity style)."""
+    blocks = []
+    
+    # Remove related questions section from text
+    text_clean = text
+    for marker in ["Tegishli savollar:", "Related questions:", "Savollar:"]:
+        if marker in text_clean:
+            text_clean = text_clean.split(marker)[0]
+    
+    # Remove sources section if present
+    for marker in ["Manbalar:", "Sources:", "Manba:"]:
+        if marker in text_clean:
+            text_clean = text_clean.split(marker)[0]
+    
+    # Split into paragraphs
+    paragraphs = [p.strip() for p in text_clean.split("\n\n") if p.strip()]
+    
+    # If no double newlines, try single newlines for shorter responses
+    if len(paragraphs) <= 1:
+        paragraphs = [p.strip() for p in text_clean.split("\n") if p.strip() and len(p.strip()) > 20]
+    
+    # Get all source IDs for distribution
+    all_source_ids = list(sources.keys())
+    
+    for i, para in enumerate(paragraphs):
+        if not para or len(para) < 10:
+            continue
+            
+        # Find citation references like [1], [2], [3] in this paragraph
+        citation_pattern = r'\[(\d+)\]'
+        found_ids = list(dict.fromkeys(re.findall(citation_pattern, para)))  # Preserve order, remove dupes
+        
+        # Filter to only valid source IDs
+        anchor_sources = [sid for sid in found_ids if sid in sources]
+        
+        # If no citations found in text, assign sources based on paragraph position
+        if not anchor_sources and all_source_ids:
+            # Distribute sources across paragraphs
+            sources_per_para = max(1, len(all_source_ids) // max(1, len(paragraphs)))
+            start_idx = i * sources_per_para
+            end_idx = min(start_idx + sources_per_para, len(all_source_ids))
+            if start_idx < len(all_source_ids):
+                anchor_sources = all_source_ids[start_idx:end_idx]
+            else:
+                # Last paragraphs get remaining sources
+                anchor_sources = all_source_ids[-1:] if all_source_ids else []
+        
+        # Clean the paragraph text (remove citation markers)
+        clean_text = re.sub(r'\s*\[\d+\]\s*', ' ', para).strip()
+        clean_text = re.sub(r'\s+', ' ', clean_text)
+        
+        if clean_text:
+            blocks.append({
+                "text": clean_text,
+                "anchorSources": anchor_sources  # Ordered by relevance (first = primary)
+            })
+    
+    # If no blocks created, create one from the whole text
+    if not blocks and text_clean.strip():
+        all_ids = list(dict.fromkeys(re.findall(r'\[(\d+)\]', text_clean)))
+        anchor_sources = [sid for sid in all_ids if sid in sources]
+        if not anchor_sources:
+            anchor_sources = all_source_ids[:3] if all_source_ids else []
+        clean_text = re.sub(r'\s*\[\d+\]\s*', ' ', text_clean).strip()
+        blocks.append({
+            "text": clean_text,
+            "anchorSources": anchor_sources
+        })
+    
+    return blocks
+
+
 def parse_answer_to_blocks(text: str, sources: list) -> list:
-    """Parse answer text into blocks with source IDs."""
+    """Parse answer text into blocks with source IDs (legacy)."""
     blocks = []
     
     # Remove related questions section from text
