@@ -320,7 +320,7 @@ def ask_gemini_grounded(question: str, history: list = None) -> str:
     
     # Add chat history if provided
     if history:
-        for msg in history[-5:]:  # Last 5 messages max
+        for msg in history[-1:]:  # Last 1 message only
             role = "user" if msg.get("role") == "user" else "model"
             text = msg.get("content", "")
             if text:
