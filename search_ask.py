@@ -314,23 +314,9 @@ def ask_gemini_grounded(question: str) -> str:
     if not GEMINI_API_KEY:
         return None
     
-    full_question = f"""O'zbekiston qonunchiligi haqida savol (lex.uz saytidan ma'lumot izla): {question}
+    full_question = f"""{question}
 
-Javob oxirida ALBATTA quyidagi formatda yozing:
-
-Manbalar:
-[1] Manba nomi - URL
-[2] Manba nomi - URL
-[3] Manba nomi - URL
-... (barcha topilgan manbalarni yozing)
-
-Tegishli savollar:
-- Savol?
-- Savol?
-- Savol?
-- Savol?
-- Savol?
-(5-6 ta tegishli savol yozing)"""
+O'zbek tilida javob ber. Qisqa va aniq javob ber (2-5 jumla). Oxirida manbalar va 5 ta tegishli savol qo'sh."""
     
     try:
         resp = requests.post(
