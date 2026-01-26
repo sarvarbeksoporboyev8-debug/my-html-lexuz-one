@@ -232,20 +232,15 @@ Quyidagi manbalar va o'zingizning bilimlaringiz asosida savolga javob bering.
 
 QOIDALAR:
 1. Tabiiy, ravon o'zbek tilida javob yozing
-2. Javobda manbalardan foydalansangiz, [1], [2] kabi raqamlar bilan ko'rsating
+2. Javobda manbalardan foydalansangiz, [1], [2], [3] kabi raqamlar bilan ko'rsating
 3. Javob qisqa va aniq bo'lsin
 4. Javob oxirida ALBATTA quyidagi formatda yozing:
 
 Manbalar:
-[1] Manba nomi - URL
-[2] Manba nomi - URL
+(Barcha foydalanilgan manbalarni [N] format da yozing)
 
 Tegishli savollar:
-- Birinchi tegishli savol?
-- Ikkinchi tegishli savol?
-- Uchinchi tegishli savol?
-- To'rtinchi tegishli savol?
-- Beshinchi tegishli savol?
+(5-6 ta tegishli savol yozing)
 
 MANBALAR (lex.uz):
 {context_str}
@@ -323,13 +318,16 @@ Javob oxirida ALBATTA quyidagi formatda yozing:
 Manbalar:
 [1] Manba nomi - URL
 [2] Manba nomi - URL
+[3] Manba nomi - URL
+... (barcha topilgan manbalarni yozing)
 
 Tegishli savollar:
-- Birinchi tegishli savol?
-- Ikkinchi tegishli savol?
-- Uchinchi tegishli savol?
-- To'rtinchi tegishli savol?
-- Beshinchi tegishli savol?"""
+- Savol?
+- Savol?
+- Savol?
+- Savol?
+- Savol?
+(5-6 ta tegishli savol yozing)"""
     
     try:
         resp = requests.post(
@@ -403,19 +401,14 @@ def ask_perplexity(question: str) -> str:
 
 QOIDALAR:
 1. Javoblarni o'zbek tilida, aniq va qisqa bering
-2. Manbalardan foydalansangiz [1], [2] kabi raqamlar bilan ko'rsating
+2. Manbalardan foydalansangiz [1], [2], [3] kabi raqamlar bilan ko'rsating
 3. Javob oxirida ALBATTA quyidagi formatda yozing:
 
 Manbalar:
-[1] Manba nomi - URL
-[2] Manba nomi - URL
+(Barcha foydalanilgan manbalarni [N] Nom - URL formatida yozing)
 
 Tegishli savollar:
-- Birinchi tegishli savol?
-- Ikkinchi tegishli savol?
-- Uchinchi tegishli savol?
-- To'rtinchi tegishli savol?
-- Beshinchi tegishli savol?"""
+(5-6 ta tegishli savol yozing)"""
     
     try:
         resp = requests.post(
