@@ -750,7 +750,7 @@ Tegishli savollar:
 
 
 def search_ask(question: str, history: list = None) -> str:
-    """Main function: Gemini first (best), then Perplexity, then DuckDuckGo + DeepSeek."""
+    """Main function: Perplexity first (best), then Gemini, then Local FTS."""
     
     print(f"\n{'='*60}")
     print(f"SAVOL: {question}")
@@ -758,21 +758,21 @@ def search_ask(question: str, history: list = None) -> str:
         print(f"HISTORY: {len(history)} messages")
     print('='*60)
     
-    # 1. GEMINI - Primary choice (cheap + has web search)
-    if GEMINI_API_KEY:
-        print("\n[GEMINI] Using Google Gemini with Search Grounding...")
-        answer = ask_gemini_grounded(question, history=history)
-        if answer:
-            return answer
-        print("[GEMINI] Failed, trying Perplexity...")
-    
-    # 2. PERPLEXITY - Backup
+    # 1. PERPLEXITY - Best quality
     if PERPLEXITY_API_KEY:
         print("\n[PERPLEXITY] Using Perplexity API...")
         answer = ask_perplexity(question)
         if answer:
             return answer
-        print("[PERPLEXITY] Failed, falling back to DuckDuckGo + DeepSeek...")
+        print("[PERPLEXITY] Failed, trying Gemini...")
+    
+    # 2. GEMINI - Google AI Mode with Search Grounding
+    if GEMINI_API_KEY:
+        print("\n[GEMINI] Using Google Gemini with Search Grounding...")
+        answer = ask_gemini_grounded(question, history=history)
+        if answer:
+            return answer
+        print("[GEMINI] Failed, trying Local FTS...")
 
     # 3. LOCAL FTS + DeepSeek - Fallback
     if LEXUZ_LOCAL_FTS_DB and LexUZFTSSearcher is not None:
