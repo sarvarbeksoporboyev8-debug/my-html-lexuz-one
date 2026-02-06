@@ -455,8 +455,8 @@ Oxirida 5 ta tegishli savol yoz."""
         # Parse answer into blocks with anchorSources (ordered by relevance)
         blocks = parse_answer_to_blocks_v2(answer_text, sources)
         
-        # Extract related questions
-        related_questions = extract_related_questions(answer_text)
+        # Generate context-aware related questions
+        related_questions = generate_related_questions(question, answer_text)
         
         return {
             "blocks": blocks,
@@ -634,17 +634,159 @@ def extract_related_questions(text: str) -> list:
             if len(questions) >= 6:
                 break
     
-    # Default questions if none found
-    if not questions:
-        questions = [
-            "Bu mavzu bo'yicha boshqa qonunlar bormi?",
-            "Qanday jarimalar ko'zda tutilgan?",
-            "Bu qonun qachon kuchga kirgan?",
-            "Istisnolar bormi?",
-            "Amaliyotda qanday qo'llaniladi?"
-        ]
-    
     return questions
+
+
+def generate_related_questions(question: str, answer_text: str) -> list:
+    """Generate context-aware related questions based on the topic."""
+    
+    # Topic-based question templates
+    topic_questions = {
+        # Tax related
+        "soliq": [
+            "Soliq to'lash muddatlari qanday?",
+            "Soliqdan ozod qilinadigan holatlar bormi?",
+            "Soliq deklaratsiyasi qachon topshiriladi?",
+            "Soliq stavkalari qanday hisoblanadi?",
+            "Soliq imtiyozlari kimlar uchun amal qiladi?"
+        ],
+        "qqs": [
+            "QQS stavkasi necha foiz?",
+            "QQSdan ozod qilingan tovarlar qaysilar?",
+            "QQS deklaratsiyasi qachon topshiriladi?",
+            "QQS qaytarib olish tartibi qanday?",
+            "QQS hisobga olish qoidalari qanday?"
+        ],
+        "daromad": [
+            "Jismoniy shaxslar daromad solig'i stavkasi qancha?",
+            "Daromad solig'idan ozod qilinadigan daromadlar qaysilar?",
+            "Daromad solig'i deklaratsiyasi qachon topshiriladi?",
+            "Daromad solig'i imtiyozlari kimlar uchun?",
+            "Daromad solig'i qanday hisoblanadi?"
+        ],
+        # Labor related
+        "mehnat": [
+            "Mehnat shartnomasi qanday tuziladi?",
+            "Ishdan bo'shatish tartibi qanday?",
+            "Ish vaqti normalari qanday?",
+            "Mehnat ta'tili necha kun?",
+            "Ish haqi to'lash muddatlari qanday?"
+        ],
+        "ta'til": [
+            "Yillik mehnat ta'tili necha kun?",
+            "Qo'shimcha ta'til kimlar uchun beriladi?",
+            "Ta'til puli qanday hisoblanadi?",
+            "Ta'tilni bo'lib olish mumkinmi?",
+            "Dekret ta'tili muddati qancha?"
+        ],
+        "ish haqi": [
+            "Minimal ish haqi qancha?",
+            "Ish haqi qachon to'lanadi?",
+            "Ish haqidan ushlab qolinadigan soliqlar qaysilar?",
+            "Qo'shimcha ish uchun haq qanday hisoblanadi?",
+            "Ish haqi kechiktirilsa nima qilish kerak?"
+        ],
+        # Business related
+        "biznes": [
+            "Biznes ro'yxatdan o'tkazish tartibi qanday?",
+            "Qanday litsenziyalar talab qilinadi?",
+            "Soliq hisoboti qachon topshiriladi?",
+            "Tadbirkorlik shakllari qanday?",
+            "Biznesni yopish tartibi qanday?"
+        ],
+        "mchj": [
+            "MChJ ro'yxatdan o'tkazish tartibi qanday?",
+            "MChJ ustav fondi qancha bo'lishi kerak?",
+            "MChJ ta'sischilar soni qancha?",
+            "MChJ soliq imtiyozlari bormi?",
+            "MChJ tugatish tartibi qanday?"
+        ],
+        "litsenziya": [
+            "Litsenziya olish tartibi qanday?",
+            "Litsenziya muddati qancha?",
+            "Litsenziyasiz faoliyat uchun jarima qancha?",
+            "Qaysi faoliyatlar litsenziyalanadi?",
+            "Litsenziya bekor qilinishi mumkinmi?"
+        ],
+        # Property related
+        "mulk": [
+            "Mulk huquqini ro'yxatdan o'tkazish tartibi qanday?",
+            "Mulk solig'i qanday hisoblanadi?",
+            "Mulkni sotish tartibi qanday?",
+            "Mulk huquqi qanday himoyalanadi?",
+            "Mulkni meros qilib olish tartibi qanday?"
+        ],
+        "uy-joy": [
+            "Uy-joy sotib olish tartibi qanday?",
+            "Ipoteka krediti shartlari qanday?",
+            "Uy-joy solig'i qanday hisoblanadi?",
+            "Uy-joyni ijaraga berish qoidalari qanday?",
+            "Uy-joy ro'yxatdan o'tkazish tartibi qanday?"
+        ],
+        # Family related
+        "oila": [
+            "Nikoh ro'yxatdan o'tkazish tartibi qanday?",
+            "Ajrashish tartibi qanday?",
+            "Alimentlar qanday belgilanadi?",
+            "Bolalar huquqlari qanday himoyalanadi?",
+            "Oilaviy mulk qanday bo'linadi?"
+        ],
+        "nikoh": [
+            "Nikoh yoshiga yetish necha yoshda?",
+            "Nikoh shartnomasi tuzish mumkinmi?",
+            "Nikohni bekor qilish asoslari qanday?",
+            "Nikoh guvohnomasi qanday olinadi?",
+            "Chet ellik bilan nikoh tartibi qanday?"
+        ],
+        # Criminal related
+        "jinoyat": [
+            "Jinoyat turlari qanday?",
+            "Jazolar qanday belgilanadi?",
+            "Advokat olish huquqi qanday?",
+            "Jinoyat ishi qanday qo'zg'atiladi?",
+            "Sudlanganlik muddati qancha?"
+        ],
+        "jarima": [
+            "Ma'muriy jarimalar qanday to'lanadi?",
+            "Jarima to'lash muddati qancha?",
+            "Jarimani bo'lib to'lash mumkinmi?",
+            "Jarimaga shikoyat qilish tartibi qanday?",
+            "Jarima to'lanmasa nima bo'ladi?"
+        ],
+        # Default
+        "default": [
+            "Bu mavzu bo'yicha qonun qachon qabul qilingan?",
+            "Qanday hujjatlar talab qilinadi?",
+            "Murojaat qilish tartibi qanday?",
+            "Qonun buzilsa qanday javobgarlik ko'zda tutilgan?",
+            "Bu sohadagi so'nggi o'zgarishlar qanday?"
+        ]
+    }
+    
+    # Find matching topic
+    question_lower = question.lower()
+    answer_lower = answer_text.lower()
+    combined = question_lower + " " + answer_lower
+    
+    matched_questions = []
+    
+    for topic, questions_list in topic_questions.items():
+        if topic != "default" and topic in combined:
+            matched_questions.extend(questions_list)
+    
+    # If no specific topic matched, use default
+    if not matched_questions:
+        matched_questions = topic_questions["default"]
+    
+    # Remove duplicates while preserving order
+    seen = set()
+    unique_questions = []
+    for q in matched_questions:
+        if q not in seen:
+            seen.add(q)
+            unique_questions.append(q)
+    
+    return unique_questions[:5]
 
 
 def ask_gemini_grounded(question: str, history: list = None) -> str:
@@ -694,8 +836,8 @@ def ask_perplexity_structured(question: str, history: list = None) -> dict:
 QOIDALAR:
 1. Javoblarni o'zbek tilida, aniq va qisqa bering (2-4 paragraf)
 2. Har bir paragrafda manbalarni [1], [2] kabi raqamlar bilan ko'rsating
-3. Javob oxirida 5-6 ta MUSTAQIL tegishli savol yozing - har bir savol o'z-o'zidan tushunarli bo'lsin, oldingi javobga bog'liq bo'lmasin. Masalan: "QQSdan ozod qilingan tovarlar qaysilar?" yaxshi, "Bu haqida batafsil ma'lumot bormi?" yomon.
-4. HECH QACHON ** belgisini ishlatmang - bold/qalin matn kerak emas"""
+3. HECH QACHON ** belgisini ishlatmang - bold/qalin matn kerak emas
+4. Tegishli savollar YOZMA - men o'zim qo'shaman"""
     
     try:
         resp = requests.post(
@@ -762,8 +904,8 @@ QOIDALAR:
         # Parse answer into blocks
         blocks = parse_answer_to_blocks_v2(answer_text, sources)
         
-        # Extract related questions
-        related_questions = extract_related_questions(answer_text)
+        # Generate context-aware related questions (don't rely on Perplexity's)
+        related_questions = generate_related_questions(question, answer_text)
         
         return {
             "blocks": blocks,
