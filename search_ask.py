@@ -720,19 +720,39 @@ QOIDALAR:
         answer_text = data["choices"][0]["message"]["content"]
         citations = data.get("citations", [])
         
-        # Build sources dict from citations
+        # Find all citation numbers used in the text [1], [2], [6], etc.
+        used_citation_nums = list(dict.fromkeys(re.findall(r'\[(\d+)\]', answer_text)))
+        
+        # Build sources dict - map citation numbers to URLs
         sources = {}
+        for citation_num in used_citation_nums:
+            idx = int(citation_num) - 1  # Convert to 0-indexed
+            if 0 <= idx < len(citations):
+                url = citations[idx]
+                label = extract_domain_label(url)
+                title = extract_title_from_url(url)
+                sources[citation_num] = {
+                    "id": int(citation_num),
+                    "url": url,
+                    "domain": urlparse(url).netloc if url else "",
+                    "label": label,
+                    "title": title,
+                    "snippet": ""
+                }
+        
+        # Also add any citations not referenced in text (for completeness)
         for i, url in enumerate(citations, 1):
-            label = extract_domain_label(url)
-            title = extract_title_from_url(url)
-            sources[str(i)] = {
-                "id": i,
-                "url": url,
-                "domain": urlparse(url).netloc if url else "",
-                "label": label,
-                "title": title,
-                "snippet": ""
-            }
+            if str(i) not in sources:
+                label = extract_domain_label(url)
+                title = extract_title_from_url(url)
+                sources[str(i)] = {
+                    "id": i,
+                    "url": url,
+                    "domain": urlparse(url).netloc if url else "",
+                    "label": label,
+                    "title": title,
+                    "snippet": ""
+                }
         
         # Parse answer into blocks
         blocks = parse_answer_to_blocks_v2(answer_text, sources)
