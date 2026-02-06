@@ -694,7 +694,7 @@ def ask_perplexity_structured(question: str, history: list = None) -> dict:
 QOIDALAR:
 1. Javoblarni o'zbek tilida, aniq va qisqa bering (2-4 paragraf)
 2. Har bir paragrafda manbalarni [1], [2] kabi raqamlar bilan ko'rsating
-3. Javob oxirida 5-6 ta tegishli savol yozing
+3. Javob oxirida 5-6 ta MUSTAQIL tegishli savol yozing - har bir savol o'z-o'zidan tushunarli bo'lsin, oldingi javobga bog'liq bo'lmasin. Masalan: "QQSdan ozod qilingan tovarlar qaysilar?" yaxshi, "Bu haqida batafsil ma'lumot bormi?" yomon.
 4. HECH QACHON ** belgisini ishlatmang - bold/qalin matn kerak emas"""
     
     try:
