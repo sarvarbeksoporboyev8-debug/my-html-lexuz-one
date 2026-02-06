@@ -637,10 +637,10 @@ def extract_related_questions(text: str) -> list:
     return questions
 
 
-def generate_related_questions_with_gemma(question: str, answer_text: str) -> list:
-    """Generate related questions using Gemma via OpenRouter."""
+def generate_related_questions_with_gemini(question: str, answer_text: str) -> list:
+    """Generate related questions using Gemini Flash (free tier)."""
     
-    if not OPENROUTER_API_KEY:
+    if not GEMINI_API_KEY:
         return []
     
     prompt = f"""Savol: {question}
@@ -660,26 +660,25 @@ Savollar:"""
 
     try:
         resp = requests.post(
-            f"{OPENROUTER_BASE_URL}/chat/completions",
-            headers={
-                "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-                "Content-Type": "application/json",
-            },
+            "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent",
+            headers={"Content-Type": "application/json"},
+            params={"key": GEMINI_API_KEY},
             json={
-                "model": OPENROUTER_MODEL,
-                "messages": [{"role": "user", "content": prompt}],
-                "temperature": 0.7,
-                "max_tokens": 300,
+                "contents": [{"parts": [{"text": prompt}]}],
+                "generationConfig": {
+                    "temperature": 0.7,
+                    "maxOutputTokens": 300,
+                }
             },
             timeout=15,
         )
         
         if resp.status_code != 200:
-            print(f"[GEMMA] Error: {resp.status_code}")
+            print(f"[GEMINI] Error generating questions: {resp.status_code}")
             return []
         
         data = resp.json()
-        text = data["choices"][0]["message"]["content"].strip()
+        text = data["candidates"][0]["content"]["parts"][0]["text"].strip()
         
         # Parse questions from response
         questions = []
@@ -701,13 +700,13 @@ Savollar:"""
         return questions
         
     except Exception as e:
-        print(f"[GEMMA] Failed to generate questions: {e}")
+        print(f"[GEMINI] Failed to generate questions: {e}")
         return []
 
 
 def generate_related_questions(question: str, answer_text: str) -> list:
-    """Generate related questions - wrapper that uses Gemma."""
-    return generate_related_questions_with_gemma(question, answer_text)
+    """Generate related questions using Gemini Flash."""
+    return generate_related_questions_with_gemini(question, answer_text)
 
 
 def ask_gemini_grounded(question: str, history: list = None) -> str:
