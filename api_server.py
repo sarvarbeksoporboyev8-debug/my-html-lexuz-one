@@ -16,7 +16,7 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse
 
 # Import search_ask function
-from search_ask import search_ask, ask_gemini_structured, ask_perplexity_structured, LEXUZ_LOCAL_FTS_DB, DEEPSEEK_API_KEY, OPENROUTER_API_KEY, GEMINI_API_KEY, PERPLEXITY_API_KEY
+from search_ask import search_ask, ask_gemini_structured, ask_perplexity_structured, GEMINI_API_KEY, PERPLEXITY_API_KEY
 
 
 class LexUZHandler(BaseHTTPRequestHandler):
@@ -44,9 +44,8 @@ class LexUZHandler(BaseHTTPRequestHandler):
         if path == "/health":
             self._send_json({
                 "status": "ok",
-                "fts_db": bool(LEXUZ_LOCAL_FTS_DB),
-                "deepseek": bool(DEEPSEEK_API_KEY),
-                "openrouter": bool(OPENROUTER_API_KEY),
+                "perplexity": bool(PERPLEXITY_API_KEY),
+                "gemini": bool(GEMINI_API_KEY),
             })
         else:
             self._send_error("Not found", 404)
@@ -120,9 +119,8 @@ def main():
     port = int(os.getenv("PORT", "8080"))
     
     print(f"Starting LexAI API server...")
-    print(f"  FTS DB: {LEXUZ_LOCAL_FTS_DB or 'Not set'}")
-    print(f"  DeepSeek: {'Yes' if DEEPSEEK_API_KEY else 'No'}")
-    print(f"  OpenRouter: {'Yes' if OPENROUTER_API_KEY else 'No'}")
+    print(f"  Perplexity: {'Yes' if PERPLEXITY_API_KEY else 'No'}")
+    print(f"  Gemini: {'Yes' if GEMINI_API_KEY else 'No'}")
     
     server = HTTPServer(("0.0.0.0", port), LexUZHandler)
     
