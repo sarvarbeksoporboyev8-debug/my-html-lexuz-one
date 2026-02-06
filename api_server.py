@@ -16,7 +16,7 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse
 
 # Import search_ask function
-from search_ask import search_ask, ask_gemini_structured, LEXUZ_LOCAL_FTS_DB, DEEPSEEK_API_KEY, OPENROUTER_API_KEY, GEMINI_API_KEY
+from search_ask import search_ask, ask_gemini_structured, ask_perplexity_structured, LEXUZ_LOCAL_FTS_DB, DEEPSEEK_API_KEY, OPENROUTER_API_KEY, GEMINI_API_KEY, PERPLEXITY_API_KEY
 
 
 class LexUZHandler(BaseHTTPRequestHandler):
@@ -71,15 +71,25 @@ class LexUZHandler(BaseHTTPRequestHandler):
                 # Check if client wants structured response
                 structured = data.get("structured", False)
                 
-                if structured and GEMINI_API_KEY:
-                    # Return structured response with blocks, sources, relatedQuestions
-                    result = ask_gemini_structured(question, history=history)
+                if structured:
+                    result = None
+                    
+                    # Try Perplexity first (best quality)
+                    if PERPLEXITY_API_KEY:
+                        print("[API] Trying Perplexity structured...")
+                        result = ask_perplexity_structured(question, history=history)
+                    
+                    # Fallback to Gemini
+                    if not result and GEMINI_API_KEY:
+                        print("[API] Trying Gemini structured...")
+                        result = ask_gemini_structured(question, history=history)
+                    
                     if result:
                         self._send_json({
                             "question": question,
                             "structured": True,
                             "blocks": result.get("blocks", []),
-                            "sources": result.get("sources", []),
+                            "sources": result.get("sources", {}),
                             "relatedQuestions": result.get("relatedQuestions", [])
                         })
                         return

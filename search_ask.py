@@ -676,8 +676,84 @@ def ask_gemini_grounded(question: str, history: list = None) -> str:
     return answer
 
 
+def ask_perplexity_structured(question: str, history: list = None) -> dict:
+    """Use Perplexity API, return structured response like Gemini."""
+    
+    if not PERPLEXITY_API_KEY:
+        return None
+    
+    full_question = f"O'zbekiston qonunchiligi bo'yicha savol (lex.uz saytidan ma'lumot): {question}"
+    
+    system_prompt = """Siz O'zbekiston huquqiy masalalari bo'yicha yordamchi AI siz.
+
+QOIDALAR:
+1. Javoblarni o'zbek tilida, aniq va qisqa bering (2-4 paragraf)
+2. Har bir paragrafda manbalarni [1], [2] kabi raqamlar bilan ko'rsating
+3. Javob oxirida 5-6 ta tegishli savol yozing"""
+    
+    try:
+        resp = requests.post(
+            "https://api.perplexity.ai/chat/completions",
+            headers={
+                "Authorization": f"Bearer {PERPLEXITY_API_KEY}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": "sonar",
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": full_question}
+                ],
+                "search_domain_filter": ["lex.uz"],
+                "return_citations": True,
+                "search_recency_filter": "year",
+            },
+            timeout=60,
+        )
+        
+        if resp.status_code != 200:
+            print(f"[PERPLEXITY] Error: {resp.status_code} - {resp.text[:200]}")
+            return None
+        
+        data = resp.json()
+        answer_text = data["choices"][0]["message"]["content"]
+        citations = data.get("citations", [])
+        
+        # Build sources dict from citations
+        sources = {}
+        for i, url in enumerate(citations, 1):
+            label = extract_domain_label(url)
+            title = extract_title_from_url(url)
+            sources[str(i)] = {
+                "id": i,
+                "url": url,
+                "domain": urlparse(url).netloc if url else "",
+                "label": label,
+                "title": title,
+                "snippet": ""
+            }
+        
+        # Parse answer into blocks
+        blocks = parse_answer_to_blocks_v2(answer_text, sources)
+        
+        # Extract related questions
+        related_questions = extract_related_questions(answer_text)
+        
+        return {
+            "blocks": blocks,
+            "sources": sources,
+            "relatedQuestions": related_questions
+        }
+        
+    except Exception as e:
+        print(f"[PERPLEXITY] Failed: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
+
+
 def ask_perplexity(question: str) -> str:
-    """Use Perplexity API - searches and answers in one call (like Google AI Mode)."""
+    """Use Perplexity API - searches and answers in one call (legacy string response)."""
     
     if not PERPLEXITY_API_KEY:
         return None
