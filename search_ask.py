@@ -486,6 +486,11 @@ def parse_answer_to_blocks_v2(text: str, sources: dict) -> list:
         if marker in text_clean:
             text_clean = text_clean.split(marker)[0]
     
+    # Remove numbered questions at the end (e.g., "1. Question? 2. Question?")
+    # Pattern: starts with "1." and contains multiple numbered items with "?"
+    numbered_questions_pattern = r'\n\s*1\.\s+[^\n]*\?\s*(?:\d+\.\s+[^\n]*\?\s*)+$'
+    text_clean = re.sub(numbered_questions_pattern, '', text_clean, flags=re.DOTALL)
+    
     # Split into paragraphs
     paragraphs = [p.strip() for p in text_clean.split("\n\n") if p.strip()]
     
