@@ -775,6 +775,7 @@ QOIDALAR:
                 "search_domain_filter": ["lex.uz"],
                 "return_citations": True,
                 "search_recency_filter": "year",
+                "max_tokens": 500,
             },
             timeout=60,
         )
