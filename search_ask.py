@@ -27,6 +27,32 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 WEB_SEARCH_SITE_FILTER = "site:lex.uz"
 
 
+def _env_bool(name: str, default: bool) -> bool:
+    val = os.getenv(name)
+    if val is None:
+        return default
+    return str(val).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.getenv(name, str(default)))
+    except Exception:
+        return default
+
+
+LOW_COST_MODE = _env_bool("LOW_COST_MODE", True)
+
+# Hard caps for predictable spend
+WEB_MAX_RESULTS = _env_int("WEB_MAX_RESULTS", 4 if LOW_COST_MODE else 10)
+WEB_TITLE_MAX_CHARS = _env_int("WEB_TITLE_MAX_CHARS", 140 if LOW_COST_MODE else 180)
+WEB_SNIPPET_MAX_CHARS = _env_int("WEB_SNIPPET_MAX_CHARS", 220 if LOW_COST_MODE else 400)
+WEB_CONTEXT_MAX_CHARS = _env_int("WEB_CONTEXT_MAX_CHARS", 3500 if LOW_COST_MODE else 9000)
+GEMINI_WEB_SUMMARY_MAX_OUTPUT_TOKENS = _env_int("GEMINI_WEB_SUMMARY_MAX_OUTPUT_TOKENS", 600 if LOW_COST_MODE else 1200)
+PERPLEXITY_REWRITE_MAX_TOKENS = _env_int("PERPLEXITY_REWRITE_MAX_TOKENS", 80 if LOW_COST_MODE else 100)
+PERPLEXITY_ANSWER_MAX_TOKENS = _env_int("PERPLEXITY_ANSWER_MAX_TOKENS", 1600 if LOW_COST_MODE else 4000)
+
+
 
 def extract_title_from_url(url: str) -> str:
     """Extract a readable title from lex.uz URL."""
@@ -74,6 +100,7 @@ def extract_domain_label(url: str) -> str:
 def search_web_top_results(query: str, max_results: int = 8) -> list:
     """Search web results using DuckDuckGo HTML endpoint (no API key required)."""
     try:
+        effective_max_results = max(1, min(max_results, WEB_MAX_RESULTS))
         final_query = query.strip()
         if WEB_SEARCH_SITE_FILTER not in final_query:
             final_query = f"{WEB_SEARCH_SITE_FILTER} {final_query}".strip()
@@ -120,13 +147,13 @@ def search_web_top_results(query: str, max_results: int = 8) -> list:
             seen_urls.add(url)
             results.append({
                 "id": len(results) + 1,
-                "title": title[:180] if title else extract_title_from_url(url),
+                "title": title[:WEB_TITLE_MAX_CHARS] if title else extract_title_from_url(url),
                 "url": url,
-                "snippet": snippet[:400],
+                "snippet": snippet[:WEB_SNIPPET_MAX_CHARS],
                 "label": extract_domain_label(url),
             })
 
-            if len(results) >= max_results:
+            if len(results) >= effective_max_results:
                 break
 
         return results
@@ -168,7 +195,7 @@ Faqat query qaytaring."""
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt},
                 ],
-                "max_tokens": 100,
+                "max_tokens": PERPLEXITY_REWRITE_MAX_TOKENS,
             },
             timeout=20,
         )
@@ -195,10 +222,13 @@ def summarize_web_results_with_gemini(question: str, results: list) -> str:
         return None
 
     context_lines = []
-    for item in results:
-        context_lines.append(
-            f"[{item['id']}] {item.get('title', '')}\nURL: {item.get('url', '')}\nSnippet: {item.get('snippet', '')}"
-        )
+    used_chars = 0
+    for item in results[:WEB_MAX_RESULTS]:
+        line = f"[{item['id']}] {item.get('title', '')}\nURL: {item.get('url', '')}\nSnippet: {item.get('snippet', '')}"
+        if used_chars + len(line) > WEB_CONTEXT_MAX_CHARS:
+            break
+        context_lines.append(line)
+        used_chars += len(line)
 
     prompt = f"""Siz O'zbekiston huquqiy masalalari bo'yicha yordamchi AI siz.
 
@@ -238,7 +268,7 @@ Tegishli savollar:
                     "contents": [{"parts": [{"text": prompt}]}],
                     "generationConfig": {
                         "temperature": 0.2,
-                        "maxOutputTokens": 1200,
+                        "maxOutputTokens": GEMINI_WEB_SUMMARY_MAX_OUTPUT_TOKENS,
                     },
                 },
                 timeout=30,
@@ -747,7 +777,7 @@ QOIDALAR:
                 ],
                 "search_domain_filter": ["lex.uz"],
                 "return_citations": True,
-                "max_tokens": 4000,
+                "max_tokens": PERPLEXITY_ANSWER_MAX_TOKENS,
             },
             timeout=60,
         )
@@ -852,7 +882,7 @@ Tegishli savollar:
                 ],
                 "search_domain_filter": ["lex.uz"],
                 "return_citations": True,
-                "max_tokens": 4000,
+                "max_tokens": PERPLEXITY_ANSWER_MAX_TOKENS,
             },
             timeout=30,
         )
@@ -899,7 +929,7 @@ def search_ask_with_provider(question: str, history: list = None) -> tuple[str, 
     
     # 1. WEB SEARCH - Top internet results first (5-10)
     print("\n[WEB] Searching top web results...")
-    web_results = search_web_top_results(question, max_results=10)
+    web_results = search_web_top_results(question, max_results=WEB_MAX_RESULTS)
     if web_results:
         gemini_summary = summarize_web_results_with_gemini(question, web_results)
         if gemini_summary:
@@ -907,11 +937,11 @@ def search_ask_with_provider(question: str, history: list = None) -> tuple[str, 
         return build_web_results_fallback_answer(web_results), "web-search"
 
     # 1b. Perplexity rewrite -> web search retry
-    print("[WEB] No results found. Rewriting query with Perplexity (max_tokens=100)...")
+    print(f"[WEB] No results found. Rewriting query with Perplexity (max_tokens={PERPLEXITY_REWRITE_MAX_TOKENS})...")
     rewritten_query = rewrite_query_with_perplexity(question)
     if rewritten_query:
         print(f"[WEB] Retrying with rewritten query: {rewritten_query}")
-        web_results = search_web_top_results(rewritten_query, max_results=10)
+        web_results = search_web_top_results(rewritten_query, max_results=WEB_MAX_RESULTS)
         if web_results:
             gemini_summary = summarize_web_results_with_gemini(question, web_results)
             if gemini_summary:
