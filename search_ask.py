@@ -501,7 +501,7 @@ QOIDALAR:
                 "search_domain_filter": ["lex.uz"],
                 "return_citations": True,
                 "search_recency_filter": "year",
-                "max_tokens": 1000,
+                "max_tokens": 4000,
             },
             timeout=60,
         )
