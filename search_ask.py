@@ -14,7 +14,8 @@ import json
 import re
 import time
 import requests
-from urllib.parse import urlparse
+from urllib.parse import urlparse, parse_qs, unquote
+from bs4 import BeautifulSoup
 
 # Perplexity API (primary)
 PERPLEXITY_API_KEY = os.getenv("PERPLEXITY_API_KEY", "")
@@ -65,6 +66,171 @@ def extract_domain_label(url: str) -> str:
         return host or "web"
     except:
         return "web"
+
+
+def search_web_top_results(query: str, max_results: int = 8) -> list:
+    """Search web results using DuckDuckGo HTML endpoint (no API key required)."""
+    try:
+        resp = requests.get(
+            "https://duckduckgo.com/html/",
+            params={"q": query},
+            headers={
+                "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
+            },
+            timeout=20,
+        )
+        if resp.status_code != 200:
+            print(f"[WEB] Search failed: {resp.status_code}")
+            return []
+
+        soup = BeautifulSoup(resp.text, "lxml")
+        results = []
+        seen_urls = set()
+
+        for block in soup.select(".result"):
+            link_el = block.select_one("a.result__a")
+            if not link_el:
+                continue
+
+            url = link_el.get("href", "").strip()
+            if not url:
+                continue
+
+            if "uddg=" in url:
+                try:
+                    parsed = parse_qs(urlparse(url).query)
+                    url = unquote(parsed.get("uddg", [url])[0])
+                except Exception:
+                    pass
+
+            title = link_el.get_text(" ", strip=True)
+            snippet_el = block.select_one(".result__snippet")
+            snippet = snippet_el.get_text(" ", strip=True) if snippet_el else ""
+
+            if not url or url in seen_urls:
+                continue
+
+            seen_urls.add(url)
+            results.append({
+                "id": len(results) + 1,
+                "title": title[:180] if title else extract_title_from_url(url),
+                "url": url,
+                "snippet": snippet[:400],
+                "label": extract_domain_label(url),
+            })
+
+            if len(results) >= max_results:
+                break
+
+        return results
+
+    except Exception as e:
+        print(f"[WEB] Search exception: {e}")
+        return []
+
+
+def summarize_web_results_with_gemini(question: str, results: list) -> str:
+    """Summarize fetched web results with Gemini, citing [1], [2], ... markers."""
+    if not GEMINI_API_KEY or not results:
+        return None
+
+    context_lines = []
+    for item in results:
+        context_lines.append(
+            f"[{item['id']}] {item.get('title', '')}\nURL: {item.get('url', '')}\nSnippet: {item.get('snippet', '')}"
+        )
+
+    prompt = f"""Siz O'zbekiston huquqiy masalalari bo'yicha yordamchi AI siz.
+
+SAVOL:
+{question}
+
+INTERNET MANBALARI (top natijalar):
+{chr(10).join(context_lines)}
+
+QOIDALAR:
+1. Faqat berilgan manbalarga tayangan holda javob bering
+2. O'zbek tilida yozing, 2-4 paragraf, aniq va qisqa
+3. Har paragraf oxirida [1], [2] kabi iqtibos raqamlarini qo'ying
+4. Taxmin qilmang; manbada bo'lmasa ochiq ayting
+5. Oxirida quyidagi bo'limlarni yozing:
+
+Manbalar:
+[N] Sarlavha - URL
+
+Tegishli savollar:
+- 5 ta tegishli savol
+"""
+
+    models = [
+        "gemini-2.0-flash",
+        "gemini-2.0-flash-lite",
+        "gemini-1.5-flash",
+    ]
+
+    for model in models:
+        try:
+            resp = requests.post(
+                f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
+                headers={"Content-Type": "application/json"},
+                params={"key": GEMINI_API_KEY},
+                json={
+                    "contents": [{"parts": [{"text": prompt}]}],
+                    "generationConfig": {
+                        "temperature": 0.2,
+                        "maxOutputTokens": 1200,
+                    },
+                },
+                timeout=30,
+            )
+
+            if resp.status_code == 429:
+                print(f"[WEB+GEMINI] {model} rate limited, trying next model...")
+                continue
+
+            if resp.status_code != 200:
+                print(f"[WEB+GEMINI] {model} failed: {resp.status_code}")
+                continue
+
+            data = resp.json()
+            return data["candidates"][0]["content"]["parts"][0]["text"].strip()
+
+        except Exception as e:
+            print(f"[WEB+GEMINI] {model} exception: {e}")
+            continue
+
+    return None
+
+
+def build_web_results_fallback_answer(results: list) -> str:
+    """Build plain fallback answer from web search results without an LLM."""
+    if not results:
+        return "Internetdan mos natijalar topilmadi."
+
+    lines = [
+        "Perplexity/Gemini orqali to'liq javob olib bo'lmadi. Quyida internetdagi eng mos topilgan manbalar:",
+        "",
+        "Manbalar:",
+    ]
+
+    for item in results:
+        title = item.get("title", "Manba")
+        url = item.get("url", "")
+        snippet = item.get("snippet", "")
+        lines.append(f"[{item['id']}] {title} - {url}")
+        if snippet:
+            lines.append(f"    {snippet}")
+
+    lines += [
+        "",
+        "Tegishli savollar:",
+        "- Shu mavzuga oid aniq normativ hujjat qaysi?",
+        "- Maktab hududida reklama bo'yicha alohida cheklovlar bormi?",
+        "- Kripto xizmatlar logotipidan foydalanish uchun ruxsat talab qilinadimi?",
+        "- Voyaga yetmaganlarga qaratilgan reklama bo'yicha talablar qanday?",
+        "- Qaysi davlat organi bu masalani nazorat qiladi?",
+    ]
+    return "\n".join(lines)
 
 
 def ask_gemini_structured(question: str, history: list = None) -> dict:
@@ -644,7 +810,7 @@ Tegishli savollar:
 
 
 def search_ask_with_provider(question: str, history: list = None) -> tuple[str, str]:
-    """Main function with provider metadata: Perplexity first, then Gemini."""
+    """Main function with provider metadata: web-search first, then Gemini, then Perplexity."""
     
     print(f"\n{'='*60}")
     print(f"SAVOL: {question}")
@@ -652,27 +818,37 @@ def search_ask_with_provider(question: str, history: list = None) -> tuple[str, 
         print(f"HISTORY: {len(history)} messages")
     print('='*60)
     
-    # 1. PERPLEXITY - Best quality
-    if PERPLEXITY_API_KEY:
-        print("\n[PERPLEXITY] Using Perplexity API...")
-        answer = ask_perplexity(question)
-        if answer:
-            return answer, "perplexity"
-        print("[PERPLEXITY] Failed, trying Gemini...")
-    
+    # 1. WEB SEARCH - Top internet results first (5-10)
+    print("\n[WEB] Searching top web results...")
+    web_results = search_web_top_results(question, max_results=10)
+    if web_results:
+        gemini_summary = summarize_web_results_with_gemini(question, web_results)
+        if gemini_summary:
+            return gemini_summary, "web+gemini"
+        return build_web_results_fallback_answer(web_results), "web-search"
+    print("[WEB] No results found, trying Gemini...")
+
     # 2. GEMINI - Google AI Mode with Search Grounding
     if GEMINI_API_KEY:
         print("\n[GEMINI] Using Google Gemini with Search Grounding...")
         answer = ask_gemini_grounded(question, history=history)
         if answer:
             return answer, "gemini"
-        print("[GEMINI] Failed")
+        print("[GEMINI] Failed, trying Perplexity...")
+    
+    # 3. PERPLEXITY - Final provider fallback
+    if PERPLEXITY_API_KEY:
+        print("\n[PERPLEXITY] Using Perplexity API...")
+        answer = ask_perplexity(question)
+        if answer:
+            return answer, "perplexity"
+        print("[PERPLEXITY] Failed")
 
-    return "Javob topilmadi. Perplexity yoki Gemini API kalitlarini tekshiring.", "none"
+    return "Javob topilmadi. Web/Gemini/Perplexity manbalaridan javob olib bo'lmadi.", "none"
 
 
 def search_ask(question: str, history: list = None) -> str:
-    """Main function: Perplexity first (best), then Gemini, then Local FTS."""
+    """Main function: web search first, then Gemini, then Perplexity."""
     answer, _provider = search_ask_with_provider(question, history=history)
     return answer
 
