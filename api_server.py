@@ -16,7 +16,7 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse
 
 # Import search_ask function
-from search_ask import search_ask, ask_gemini_structured, ask_perplexity_structured, GEMINI_API_KEY, PERPLEXITY_API_KEY
+from search_ask import search_ask_with_provider, ask_gemini_structured, ask_perplexity_structured, GEMINI_API_KEY, PERPLEXITY_API_KEY
 
 
 class LexUZHandler(BaseHTTPRequestHandler):
@@ -72,21 +72,28 @@ class LexUZHandler(BaseHTTPRequestHandler):
                 
                 if structured:
                     result = None
+                    responder = "none"
                     
                     # Try Perplexity first (best quality)
                     if PERPLEXITY_API_KEY:
                         print("[API] Trying Perplexity structured...")
                         result = ask_perplexity_structured(question, history=history)
+                        if result:
+                            responder = "perplexity"
                     
                     # Fallback to Gemini
                     if not result and GEMINI_API_KEY:
                         print("[API] Trying Gemini structured...")
                         result = ask_gemini_structured(question, history=history)
+                        if result:
+                            responder = "gemini"
                     
                     if result:
+                        print(f"[API] Responder: {responder} (structured)")
                         self._send_json({
                             "question": question,
                             "structured": True,
+                            "responder": responder,
                             "blocks": result.get("blocks", []),
                             "sources": result.get("sources", {}),
                             "relatedQuestions": result.get("relatedQuestions", [])
@@ -94,11 +101,13 @@ class LexUZHandler(BaseHTTPRequestHandler):
                         return
                 
                 # Fallback to legacy string response
-                answer = search_ask(question, history=history)
+                answer, responder = search_ask_with_provider(question, history=history)
+                print(f"[API] Responder: {responder} (legacy)")
                 
                 self._send_json({
                     "question": question,
-                    "answer": answer
+                    "answer": answer,
+                    "responder": responder
                 })
             
             except json.JSONDecodeError:

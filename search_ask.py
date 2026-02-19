@@ -607,6 +607,7 @@ Tegishli savollar:
                 "search_domain_filter": ["lex.uz"],
                 "return_citations": True,
                 "search_recency_filter": "year",
+                "max_tokens": 4000,
             },
             timeout=30,
         )
@@ -642,8 +643,8 @@ Tegishli savollar:
         return None
 
 
-def search_ask(question: str, history: list = None) -> str:
-    """Main function: Perplexity first (best), then Gemini, then Local FTS."""
+def search_ask_with_provider(question: str, history: list = None) -> tuple[str, str]:
+    """Main function with provider metadata: Perplexity first, then Gemini."""
     
     print(f"\n{'='*60}")
     print(f"SAVOL: {question}")
@@ -656,7 +657,7 @@ def search_ask(question: str, history: list = None) -> str:
         print("\n[PERPLEXITY] Using Perplexity API...")
         answer = ask_perplexity(question)
         if answer:
-            return answer
+            return answer, "perplexity"
         print("[PERPLEXITY] Failed, trying Gemini...")
     
     # 2. GEMINI - Google AI Mode with Search Grounding
@@ -664,10 +665,16 @@ def search_ask(question: str, history: list = None) -> str:
         print("\n[GEMINI] Using Google Gemini with Search Grounding...")
         answer = ask_gemini_grounded(question, history=history)
         if answer:
-            return answer
+            return answer, "gemini"
         print("[GEMINI] Failed")
 
-    return "Javob topilmadi. Perplexity yoki Gemini API kalitlarini tekshiring."
+    return "Javob topilmadi. Perplexity yoki Gemini API kalitlarini tekshiring.", "none"
+
+
+def search_ask(question: str, history: list = None) -> str:
+    """Main function: Perplexity first (best), then Gemini, then Local FTS."""
+    answer, _provider = search_ask_with_provider(question, history=history)
+    return answer
 
 
 def main():
