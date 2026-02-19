@@ -293,6 +293,27 @@ def build_web_results_fallback_answer(results: list) -> str:
     return "\n".join(lines)
 
 
+def build_perplexity_multisearch_question(question: str) -> str:
+    """Build a Perplexity prompt that forces multiple targeted search passes."""
+    return f"""O'zbekiston qonunchiligi bo'yicha savol: {question}
+
+QIDIRUV STRATEGIYASI (MAJBURIY):
+1) Kamida 3-4 ta alohida qidiruv o'tkazing (turli kalit so'zlar bilan)
+2) Faqat lex.uz manbalariga tayaning
+3) Qidiruv yo'nalishlari:
+   - Ta'lim/maktab hududida reklama yoki axborot materiallari talablari
+   - Kripto-aktivlar/kripto-depozitariy/reklama yoki ommaviy targ'ibotga oid normalar
+   - Voyaga yetmaganlar, iste'molchilarni himoya qilish yoki moliyaviy xizmat reklama cheklovlari
+   - Davlat organlari vakolati va javobgarlik normalari
+
+JAVOB QOIDALARI:
+- O'zbek tilida 2-4 paragraf aniq xulosa bering
+- Har paragrafda [1], [2] kabi citation bo'lsin
+- Agar to'g'ridan-to'g'ri norma topilmasa, buni aniq yozing va qaysi normativ bo'shliq borligini ayting
+- Faqat manbalarda bor ma'lumotni yozing, taxmin qilmang
+"""
+
+
 def ask_gemini_structured(question: str, history: list = None) -> dict:
     """Use Google Gemini with Search Grounding, return structured response."""
     
@@ -701,7 +722,7 @@ def ask_perplexity_structured(question: str, history: list = None) -> dict:
     if not PERPLEXITY_API_KEY:
         return None
     
-    full_question = f"O'zbekiston qonunchiligi bo'yicha savol (lex.uz saytidan ma'lumot): {question}"
+    full_question = build_perplexity_multisearch_question(question)
     
     system_prompt = """Siz O'zbekiston huquqiy masalalari bo'yicha yordamchi AI siz.
 
@@ -726,7 +747,6 @@ QOIDALAR:
                 ],
                 "search_domain_filter": ["lex.uz"],
                 "return_citations": True,
-                "search_recency_filter": "year",
                 "max_tokens": 4000,
             },
             timeout=60,
@@ -799,8 +819,8 @@ def ask_perplexity(question: str) -> str:
     if not PERPLEXITY_API_KEY:
         return None
     
-    # Add context to focus on Uzbek law
-    full_question = f"O'zbekiston qonunchiligi bo'yicha savol (lex.uz saytidan ma'lumot): {question}"
+    # Add context to focus on Uzbek law + multi-search strategy
+    full_question = build_perplexity_multisearch_question(question)
     
     system_prompt = """Siz O'zbekiston huquqiy masalalari bo'yicha yordamchi AI siz.
 
@@ -832,7 +852,6 @@ Tegishli savollar:
                 ],
                 "search_domain_filter": ["lex.uz"],
                 "return_citations": True,
-                "search_recency_filter": "year",
                 "max_tokens": 4000,
             },
             timeout=30,
