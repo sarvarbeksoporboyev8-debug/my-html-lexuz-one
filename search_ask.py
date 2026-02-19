@@ -129,6 +129,55 @@ def search_web_top_results(query: str, max_results: int = 8) -> list:
         return []
 
 
+def rewrite_query_with_perplexity(question: str) -> str:
+    """Rewrite user question into a concise web-search query using Perplexity."""
+    if not PERPLEXITY_API_KEY:
+        return None
+
+    system_prompt = """Siz web qidiruv uchun query optimizatorisiz.
+Faqat bitta qidiruv so'rovini qaytaring.
+Qo'shimcha izoh bermang.
+So'rovni 8-16 so'z atrofida qiling.
+Kerak bo'lsa Uzbek + English kalit so'zlarni aralashtiring."""
+
+    user_prompt = f"""Quyidagi savol uchun Google/DuckDuckGo'da yaxshi natija beradigan aniq qidiruv query yozing:
+
+{question}
+
+Faqat query qaytaring."""
+
+    try:
+        resp = requests.post(
+            "https://api.perplexity.ai/chat/completions",
+            headers={
+                "Authorization": f"Bearer {PERPLEXITY_API_KEY}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": "sonar",
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                "max_tokens": 100,
+            },
+            timeout=20,
+        )
+
+        if resp.status_code != 200:
+            print(f"[PERPLEXITY-REWRITE] Error: {resp.status_code}")
+            return None
+
+        data = resp.json()
+        rewritten = data["choices"][0]["message"]["content"].strip()
+        rewritten = rewritten.split("\n")[0].strip().strip('"').strip("'")
+        return rewritten if rewritten else None
+
+    except Exception as e:
+        print(f"[PERPLEXITY-REWRITE] Failed: {e}")
+        return None
+
+
 def summarize_web_results_with_gemini(question: str, results: list) -> str:
     """Summarize fetched web results with Gemini, citing [1], [2], ... markers."""
     if not GEMINI_API_KEY or not results:
@@ -826,7 +875,20 @@ def search_ask_with_provider(question: str, history: list = None) -> tuple[str, 
         if gemini_summary:
             return gemini_summary, "web+gemini"
         return build_web_results_fallback_answer(web_results), "web-search"
-    print("[WEB] No results found, trying Gemini...")
+
+    # 1b. Perplexity rewrite -> web search retry
+    print("[WEB] No results found. Rewriting query with Perplexity (max_tokens=100)...")
+    rewritten_query = rewrite_query_with_perplexity(question)
+    if rewritten_query:
+        print(f"[WEB] Retrying with rewritten query: {rewritten_query}")
+        web_results = search_web_top_results(rewritten_query, max_results=10)
+        if web_results:
+            gemini_summary = summarize_web_results_with_gemini(question, web_results)
+            if gemini_summary:
+                return gemini_summary, "web+gemini+rewrite"
+            return build_web_results_fallback_answer(web_results), "web-search+rewrite"
+
+    print("[WEB] Still no results, trying Gemini...")
 
     # 2. GEMINI - Google AI Mode with Search Grounding
     if GEMINI_API_KEY:
