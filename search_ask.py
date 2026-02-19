@@ -23,6 +23,9 @@ PERPLEXITY_API_KEY = os.getenv("PERPLEXITY_API_KEY", "")
 # Google Gemini API with Search Grounding (fallback)
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 
+# Restrict web-search fallback to official legal source
+WEB_SEARCH_SITE_FILTER = "site:lex.uz"
+
 
 
 def extract_title_from_url(url: str) -> str:
@@ -71,9 +74,13 @@ def extract_domain_label(url: str) -> str:
 def search_web_top_results(query: str, max_results: int = 8) -> list:
     """Search web results using DuckDuckGo HTML endpoint (no API key required)."""
     try:
+        final_query = query.strip()
+        if WEB_SEARCH_SITE_FILTER not in final_query:
+            final_query = f"{WEB_SEARCH_SITE_FILTER} {final_query}".strip()
+
         resp = requests.get(
             "https://duckduckgo.com/html/",
-            params={"q": query},
+            params={"q": final_query},
             headers={
                 "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
             },
@@ -144,6 +151,8 @@ Kerak bo'lsa Uzbek + English kalit so'zlarni aralashtiring."""
 
 {question}
 
+MUHIM: Query lex.uz bilan cheklansin, ya'ni "site:lex.uz" operatori qatnashsin.
+
 Faqat query qaytaring."""
 
     try:
@@ -171,6 +180,8 @@ Faqat query qaytaring."""
         data = resp.json()
         rewritten = data["choices"][0]["message"]["content"].strip()
         rewritten = rewritten.split("\n")[0].strip().strip('"').strip("'")
+        if rewritten and WEB_SEARCH_SITE_FILTER not in rewritten:
+            rewritten = f"{WEB_SEARCH_SITE_FILTER} {rewritten}".strip()
         return rewritten if rewritten else None
 
     except Exception as e:
