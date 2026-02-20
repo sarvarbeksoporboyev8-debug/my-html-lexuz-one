@@ -380,6 +380,43 @@ def _merge_web_results(first: list, second: list, prefer_uz: bool = True) -> lis
     return out
 
 
+def _select_for_full_fetch(results: list, top_n: int, max_per_domain: int = 2) -> list:
+    """Choose up to top_n results to fetch in full. Prefer lex.uz > gov.uz > other .uz > rest; limit per domain for diversity."""
+    if top_n <= 0:
+        return []
+    def domain(url):
+        try:
+            return (urlparse(url).netloc or "").lower()
+        except Exception:
+            return ""
+    def tier(item):
+        url = (item.get("url") or "").lower()
+        if "lex.uz" in url:
+            return 0
+        if "gov.uz" in url:
+            return 1
+        if ".uz" in url or url.endswith(".uz"):
+            return 2
+        return 3
+    candidates = []
+    for idx, item in enumerate(results):
+        url = item.get("url") or ""
+        if not url.startswith("http"):
+            continue
+        candidates.append((tier(item), domain(url), idx, item))
+    candidates.sort(key=lambda x: (x[0], x[1]))
+    selected = []
+    domain_count = {}
+    for _t, dom, idx, item in candidates:
+        if len(selected) >= top_n:
+            break
+        if domain_count.get(dom, 0) >= max_per_domain:
+            continue
+        selected.append((idx, item))
+        domain_count[dom] = domain_count.get(dom, 0) + 1
+    return [idx for idx, _ in selected]
+
+
 def _fetch_page_text(url: str, max_chars: int, timeout: int = 10) -> str:
     """Fetch URL and return plain text (body), truncated to max_chars. Returns '' on failure."""
     try:
@@ -514,10 +551,11 @@ def summarize_web_results_with_gemini(question: str, results: list) -> str:
         return None
 
     to_process = results[:WEB_MAX_RESULTS]
-    # Pre-fetch full page text in parallel (avoids 5 × 10s sequential wait)
+    # Select which results to fetch in full (prefer lex.uz/gov.uz, diversify by domain), then fetch in parallel
     fetched = {}
     if WEB_FETCH_FULL_PAGES and WEB_FETCH_TOP_N > 0:
-        to_fetch = [(idx, item) for idx, item in enumerate(to_process) if idx < WEB_FETCH_TOP_N and item.get("url", "").startswith("http")]
+        selected_indices = _select_for_full_fetch(to_process, WEB_FETCH_TOP_N)
+        to_fetch = [(idx, to_process[idx]) for idx in selected_indices]
         if to_fetch:
             print(f"[WEB] Fetching {len(to_fetch)} full page(s) in parallel (timeout 10s each)...")
             def fetch_one(args):
