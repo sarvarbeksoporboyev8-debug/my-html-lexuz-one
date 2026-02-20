@@ -31,6 +31,31 @@ DEFAULT_EMBEDDING_MODEL = "sentence-transformers/paraphrase-multilingual-MiniLM-
 DEFAULT_MAX_WORDS = 150
 DEFAULT_OVERLAP_WORDS = 20
 
+# Modda-aware chunking for lex.uz laws (same idea as search_ask.py)
+MODDA_RE = re.compile(r"(\b\d+\s*-\s*modda\b|\b\d+\s*modda\b)", re.IGNORECASE | re.UNICODE)
+
+
+def split_by_modda(text: str) -> List[str]:
+    """Split lex.uz full text by modda boundaries. Returns list of chunks (each 'X-modda' + text)."""
+    if not (text or "").strip():
+        return []
+    parts = MODDA_RE.split(text.strip())
+    if len(parts) <= 1:
+        return []
+    chunks = []
+    i = 1
+    while i < len(parts):
+        header = (parts[i] or "").strip()
+        i += 1
+        body = []
+        while i < len(parts) and not MODDA_RE.match((parts[i] or "").strip()):
+            body.append(parts[i] or "")
+            i += 1
+        block = (header + " " + " ".join(body)).strip()
+        if block:
+            chunks.append(block)
+    return chunks
+
 
 def chunk_by_paragraph_or_words(
     text: str,
@@ -69,6 +94,31 @@ def chunk_by_paragraph_or_words(
     return chunks
 
 
+def chunk_lex_doc(
+    text: str,
+    strategy: str = "modda",
+    max_words: int = DEFAULT_MAX_WORDS,
+    overlap_words: int = DEFAULT_OVERLAP_WORDS,
+) -> List[tuple]:
+    """
+    Chunk doc text. strategy "modda" = split by modda first (for laws); "paragraph" = paragraph/words.
+    Returns list of (chunk_text, modda_label). modda_label is e.g. "32-modda" or "".
+    """
+    if strategy == "modda":
+        modda_chunks = split_by_modda(text)
+        if len(modda_chunks) >= 2:
+            out = []
+            for block in modda_chunks:
+                label = ""
+                m = MODDA_RE.search(block)
+                if m:
+                    label = m.group(1).strip()
+                out.append((block, label))
+            return out
+    chunks = chunk_by_paragraph_or_words(text, max_words, overlap_words)
+    return [(c, "") for c in chunks]
+
+
 def get_embedder(model_name: str = DEFAULT_EMBEDDING_MODEL):
     """Lazy-load sentence-transformers model."""
     from sentence_transformers import SentenceTransformer
@@ -91,23 +141,24 @@ def build_index_from_documents(
     max_words: int = DEFAULT_MAX_WORDS,
     overlap_words: int = DEFAULT_OVERLAP_WORDS,
     model_name: str = DEFAULT_EMBEDDING_MODEL,
+    chunk_strategy: str = "modda",
 ) -> int:
     """
     documents = [{"doc_id", "url", "title", "text"}, ...]
-    Chunk each doc (paragraph or max_words), embed, write to SQLite.
+    Chunk each doc: chunk_strategy "modda" = modda-aligned (best for laws), "paragraph" = paragraph/words.
     Returns number of chunks indexed.
     """
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    all_chunks: List[tuple] = []  # (doc_id, url, title, chunk_text)
+    all_chunks: List[tuple] = []  # (doc_id, url, title, chunk_text, modda_label)
     for doc in documents:
         doc_id = doc.get("doc_id") or doc.get("url", "")
         url = doc.get("url", "")
         title = doc.get("title", "")
         text = doc.get("text", "")
-        for chunk_text in chunk_by_paragraph_or_words(text, max_words, overlap_words):
-            all_chunks.append((doc_id, url, title, chunk_text))
+        for chunk_text, modda_label in chunk_lex_doc(text, strategy=chunk_strategy, max_words=max_words, overlap_words=overlap_words):
+            all_chunks.append((doc_id, url, title, chunk_text, modda_label or ""))
 
     if not all_chunks:
         print("No chunks produced from documents.")
@@ -120,21 +171,23 @@ def build_index_from_documents(
 
     conn = sqlite3.connect(str(output_path))
     conn.execute("PRAGMA journal_mode=WAL;")
+    conn.execute("DROP TABLE IF EXISTS chunk_embeddings")
     conn.execute("""
-        CREATE TABLE IF NOT EXISTS chunk_embeddings (
+        CREATE TABLE chunk_embeddings (
             chunk_id INTEGER PRIMARY KEY AUTOINCREMENT,
             doc_id TEXT NOT NULL,
             url TEXT NOT NULL,
             title TEXT,
+            modda_label TEXT,
             chunk_text TEXT NOT NULL,
             embedding BLOB NOT NULL
         );
     """)
     conn.execute("DELETE FROM chunk_embeddings")
-    for i, (doc_id, url, title, chunk_text) in enumerate(all_chunks):
+    for i, (doc_id, url, title, chunk_text, modda_label) in enumerate(all_chunks):
         conn.execute(
-            "INSERT INTO chunk_embeddings(doc_id, url, title, chunk_text, embedding) VALUES (?,?,?,?,?)",
-            (doc_id, url, title or "", chunk_text, blobs[i]),
+            "INSERT INTO chunk_embeddings(doc_id, url, title, modda_label, chunk_text, embedding) VALUES (?,?,?,?,?,?)",
+            (doc_id, url, title or "", modda_label or "", chunk_text, blobs[i]),
         )
     conn.commit()
     conn.close()
@@ -148,16 +201,16 @@ def build_index_from_db(
     max_words: int = DEFAULT_MAX_WORDS,
     overlap_words: int = DEFAULT_OVERLAP_WORDS,
     model_name: str = DEFAULT_EMBEDDING_MODEL,
+    chunk_strategy: str = "modda",
 ) -> int:
     """
     Read documents + chunks from existing lexuz.sqlite3 (documents + chunks tables).
-    Re-chunk by paragraph/words if you want smaller chunks; then embed and write.
+    Re-chunk by modda or paragraph/words; then embed and write.
     """
     db_path = Path(db_path)
     output_path = Path(output_path)
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
-    # Get full doc text by concatenating chunks (or use a single text column if you have it)
     rows = conn.execute("""
         SELECT d.doc_id, d.url, d.title,
                (SELECT GROUP_CONCAT(c.text, char(10)) FROM chunks c WHERE c.doc_id = d.doc_id AND c.active = 1 ORDER BY c.chunk_index) AS full_text
@@ -178,6 +231,7 @@ def build_index_from_db(
         max_words=max_words,
         overlap_words=overlap_words,
         model_name=model_name,
+        chunk_strategy=chunk_strategy,
     )
 
 
@@ -239,6 +293,7 @@ def main():
     build.add_argument("--output", type=Path, required=True, help="Output SQLite path (chunk_embeddings)")
     build.add_argument("--max-words", type=int, default=DEFAULT_MAX_WORDS, help="Max words per chunk (paragraph or window)")
     build.add_argument("--overlap-words", type=int, default=DEFAULT_OVERLAP_WORDS, help="Overlap for long paragraphs")
+    build.add_argument("--chunk-strategy", type=str, default="modda", choices=("modda", "paragraph"), help="modda = split by X-modda (best for laws); paragraph = paragraph/words")
     build.add_argument("--model", type=str, default=DEFAULT_EMBEDDING_MODEL)
     # search
     search = sub.add_parser("search", help="Search index by question")
@@ -249,6 +304,7 @@ def main():
     args = ap.parse_args()
 
     if args.cmd == "build":
+        chunk_strategy = getattr(args, "chunk_strategy", "modda")  # --chunk-strategy
         if args.docs_json and args.docs_json.exists():
             with open(args.docs_json, "r", encoding="utf-8") as f:
                 documents = json.load(f)
@@ -258,6 +314,7 @@ def main():
                 max_words=args.max_words,
                 overlap_words=args.overlap_words,
                 model_name=args.model,
+                chunk_strategy=chunk_strategy,
             )
         elif args.db and args.db.exists():
             n = build_index_from_db(
@@ -266,6 +323,7 @@ def main():
                 max_words=args.max_words,
                 overlap_words=args.overlap_words,
                 model_name=args.model,
+                chunk_strategy=chunk_strategy,
             )
         else:
             print("Provide --docs-json or --db (existing lexuz.sqlite3).")

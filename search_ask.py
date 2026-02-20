@@ -67,8 +67,18 @@ WEB_FETCH_CANDIDATES_MAX = _env_int("WEB_FETCH_CANDIDATES_MAX", 60)
 WEB_FETCH_MAX_CHARS_PER_PAGE = _env_int("WEB_FETCH_MAX_CHARS_PER_PAGE", 2500)
 # Select by chunks (paragraph/100–150 words) from fetched docs so the exact relevant part wins; if False, select best 5 full docs
 WEB_SELECT_BY_CHUNKS = _env_bool("WEB_SELECT_BY_CHUNKS", True)
+# Two-stage: first pick this many docs by title+snippet+url only, then fetch and score modda/chunks (avoids wrong-theme docs flooding pool)
+WEB_FETCH_TOP_DOCS = _env_int("WEB_FETCH_TOP_DOCS", 10)
 WEB_CHUNK_MAX_WORDS = _env_int("WEB_CHUNK_MAX_WORDS", 150)
 WEB_CHUNK_OVERLAP_WORDS = _env_int("WEB_CHUNK_OVERLAP_WORDS", 20)
+# MMR (Maximal Marginal Relevance): pick chunks that are relevant and non-redundant (λ=relevance, 1-λ=diversity)
+WEB_USE_MMR = _env_bool("WEB_USE_MMR", True)
+WEB_MMR_LAMBDA = max(0.0, min(1.0, float(os.getenv("WEB_MMR_LAMBDA", "0.7"))))
+WEB_MMR_CANDIDATES = _env_int("WEB_MMR_CANDIDATES", 15)
+# Cross-encoder reranker: take top N by score, rerank (query, chunk), send top 5 to Gemini
+WEB_USE_RERANKER = _env_bool("WEB_USE_RERANKER", True)
+WEB_RERANKER_MODEL = os.getenv("WEB_RERANKER_MODEL", "BAAI/bge-reranker-v2-m3")
+WEB_RERANKER_CANDIDATES = _env_int("WEB_RERANKER_CANDIDATES", 8)
 # DuckDuckGo rate-limit avoidance: retries and delay (seconds)
 WEB_SEARCH_RETRIES = _env_int("WEB_SEARCH_RETRIES", 3)
 WEB_SEARCH_RETRY_DELAY = _env_int("WEB_SEARCH_RETRY_DELAY", 2)
@@ -365,11 +375,33 @@ def search_web_top_results(query: str, max_results: int = 8) -> list:
         return []
 
 
+def is_lex_doc(url: str) -> bool:
+    """Only allow lex.uz document pages (exclude homepage, index, search)."""
+    u = (url or "").lower()
+    return ("lex.uz" in u) and ("/docs/" in u)
+
+
+def _is_lex_index_or_homepage(item: dict) -> bool:
+    """Drop lex.uz homepage / index pages (no doc id)."""
+    url = (item.get("url") or "").lower()
+    if not url or "/docs/" in url:
+        return False
+    if "lex.uz" in url and (url.rstrip("/").endswith("lex.uz") or url.rstrip("/").endswith("lex.uz/uz")):
+        return True
+    title = (item.get("title") or "").strip()
+    if title and "o'zbekiston qonunchiligi" in title.lower() and "/docs/" not in url:
+        return True
+    return False
+
+
 def _filter_lex_only(results: list) -> list:
-    """Keep only results whose URL is from lex.uz. Reassign ids 1..n."""
+    """Keep only lex.uz document pages (/docs/...). Drop homepage and index pages. Reassign ids 1..n."""
     if not results:
         return []
-    out = [r for r in results if r.get("url") and "lex.uz" in (r.get("url") or "").lower()]
+    out = [
+        r for r in results
+        if r.get("url") and is_lex_doc(r.get("url", "")) and not _is_lex_index_or_homepage(r)
+    ]
     for i, item in enumerate(out, 1):
         item["id"] = i
     return out
@@ -487,6 +519,88 @@ def _embedding_similarities(question: str, doc_texts: list) -> list:
         return []
 
 
+def _get_embedding_vectors(texts: list):
+    """Return (list of numpy vectors for texts) or None. Used for MMR."""
+    model = _get_embedding_model()
+    if model is None or not texts:
+        return None
+    try:
+        import numpy as np
+        trimmed = [(t or "")[:_EMBEDDING_MAX_CHARS] for t in texts]
+        vecs = model.encode(trimmed, convert_to_numpy=True, show_progress_bar=False)
+        return [vecs[i].astype(np.float32) for i in range(len(vecs))]
+    except Exception:
+        return None
+
+
+_reranker_model = None
+
+
+def _get_reranker_model():
+    global _reranker_model
+    if _reranker_model is not None:
+        return _reranker_model
+    if not WEB_USE_RERANKER:
+        return None
+    try:
+        from sentence_transformers import CrossEncoder
+        _reranker_model = CrossEncoder(WEB_RERANKER_MODEL)
+        return _reranker_model
+    except Exception as e:
+        print(f"[WEB] Reranker disabled (load failed: {e}).")
+        return None
+
+
+def _rerank_chunks(question: str, chunk_items: list) -> list:
+    """
+    chunk_items = [(chunk_text, idx, url, title), ...]. Returns same list reordered by cross-encoder score (best first).
+    """
+    model = _get_reranker_model()
+    if model is None or not chunk_items or len(chunk_items) <= 1:
+        return chunk_items
+    try:
+        import numpy as np
+        pairs = [(question, (c[0] or "")[:4000]) for c in chunk_items]
+        scores = model.predict(pairs)
+        scores = np.array(scores).ravel()
+        order = np.argsort(-scores)
+        return [chunk_items[i] for i in order]
+    except Exception as e:
+        print(f"[WEB] Reranker failed: {e}; using original order.")
+        return chunk_items
+
+
+# Modda-aware chunking for lex.uz: split by "32-modda", "33-modda" etc. so each chunk is one article.
+MODDA_RE = re.compile(r"(\b\d+\s*-\s*modda\b|\b\d+\s*modda\b)", re.IGNORECASE | re.UNICODE)
+
+
+def _split_by_modda(text: str) -> list:
+    """
+    Split lex.uz full text by modda boundaries. Returns list of chunks, each starting with "X-modda" + text.
+    Beats generic 150-word windows for laws.
+    """
+    if not (text or "").strip():
+        return []
+    parts = MODDA_RE.split(text.strip())
+    if len(parts) <= 1:
+        return []
+    chunks = []
+    i = 1
+    while i < len(parts):
+        header = (parts[i] or "").strip()
+        i += 1
+        body = []
+        while i < len(parts) and not MODDA_RE.match((parts[i] or "").strip()):
+            body.append(parts[i] or "")
+            i += 1
+        block = (header + " " + " ".join(body)).strip()
+        if block:
+            chunks.append(block)
+    if not chunks:
+        return []
+    return chunks
+
+
 def _chunk_doc_text(text: str, max_words: int = 150, overlap_words: int = 20) -> list:
     """Split text into paragraphs or max_words segments (same logic as lexuz_chunk_embedding)."""
     try:
@@ -506,6 +620,58 @@ def _chunk_doc_text(text: str, max_words: int = 150, overlap_words: int = 20) ->
                 break
             start = max(0, end - overlap_words)
         return chunks
+
+
+def _chunk_lex_doc_text(text: str, max_words: int = 150, overlap_words: int = 20) -> list:
+    """For lex.uz docs: prefer modda-aligned chunks; fallback to paragraph/word chunks."""
+    modda_chunks = _split_by_modda(text)
+    if len(modda_chunks) >= 2:
+        return modda_chunks
+    return _chunk_doc_text(text, max_words=max_words, overlap_words=overlap_words)
+
+
+def _select_docs_for_fetch(question: str, to_process: list, top_docs: int) -> list:
+    """
+    Stage 1: pick top_docs documents by BM25+embedding on title+snippet+url only (no full page fetch).
+    Returns list of indices into to_process. Reduces fetch load and focuses chunk pool on relevant docs.
+    """
+    if top_docs <= 0 or not to_process:
+        return []
+    q_tokens = _tokenize_for_relevance(question)
+    candidates = []
+    for idx, item in enumerate(to_process):
+        url = item.get("url") or ""
+        if not url.startswith("http") or not is_lex_doc(url):
+            continue
+        title = item.get("title") or ""
+        snippet = item.get("snippet") or ""
+        text = f"{title} {snippet} {url}".strip()
+        candidates.append((idx, text))
+    if not candidates:
+        return []
+    texts_only = [c[1] for c in candidates]
+    doc_freq = Counter()
+    token_lists = []
+    for _idx, t in candidates:
+        toks = _tokenize_for_relevance(t)
+        token_lists.append(toks)
+        for w in set(toks):
+            doc_freq[w] += 1
+    n = len(candidates)
+    bm25_scores = [_relevance_score_bm25(q_tokens, toks, doc_freq, n) for toks in token_lists]
+    bm_min, bm_max = min(bm25_scores), max(bm25_scores)
+    bm_range = (bm_max - bm_min) + 1e-9
+    bm25_norm = [(s - bm_min) / bm_range for s in bm25_scores]
+    emb_sims = _embedding_similarities(question, texts_only)
+    emb_norm = [(s + 1.0) / 2.0 for s in emb_sims] if emb_sims and len(emb_sims) == len(candidates) else None
+    alpha = WEB_EMBEDDING_WEIGHT if emb_norm is not None else 0.0
+    scored = []
+    for i, (idx, _t) in enumerate(candidates):
+        url = to_process[idx].get("url") or ""
+        sc = alpha * (emb_norm[i] if emb_norm is not None else bm25_norm[i]) + (1.0 - alpha) * bm25_norm[i] + _domain_bonus(url)
+        scored.append((sc, idx))
+    scored.sort(key=lambda x: (-x[0], x[1]))
+    return [idx for _sc, idx in scored[:top_docs]]
 
 
 def _select_chunks_for_context(
@@ -532,7 +698,7 @@ def _select_chunks_for_context(
         snippet = item.get("snippet") or ""
         full_text = fetched_full[idx] or ""
         text = f"{title} {snippet} {full_text}".strip()
-        for chunk_text in _chunk_doc_text(text, WEB_CHUNK_MAX_WORDS, WEB_CHUNK_OVERLAP_WORDS):
+        for chunk_text in _chunk_lex_doc_text(text, WEB_CHUNK_MAX_WORDS, WEB_CHUNK_OVERLAP_WORDS):
             if chunk_text.strip():
                 chunk_list.append((chunk_text.strip(), idx, url, title))
     if not chunk_list:
@@ -565,10 +731,54 @@ def _select_chunks_for_context(
         combined = alpha * em + (1.0 - alpha) * bm + _domain_bonus(url)
         scored.append((combined, chunk_text, idx, url, title))
     scored.sort(key=lambda x: (-x[0], x[2], x[1]))
-    # Select top_n chunks, max_per_doc per document
+    # Build candidate list for MMR / reranker: (chunk_text, idx, url, title)
+    if WEB_USE_MMR or WEB_USE_RERANKER:
+        pool_size = max(top_n, WEB_RERANKER_CANDIDATES, WEB_MMR_CANDIDATES)
+    else:
+        pool_size = min(len(scored), 50)
+    candidates = [(c[1], c[2], c[3], c[4]) for c in scored[:pool_size]]
+    # MMR: select diverse subset from top WEB_MMR_CANDIDATES (output size = WEB_RERANKER_CANDIDATES for reranker, else top_n)
+    mmr_output_size = WEB_RERANKER_CANDIDATES if WEB_USE_RERANKER else top_n
+    if WEB_USE_MMR and len(candidates) > mmr_output_size:
+        vecs = _get_embedding_vectors([c[0] for c in candidates[:WEB_MMR_CANDIDATES]])
+        if vecs is not None and len(vecs) >= mmr_output_size:
+            import numpy as np
+            q_vec = _get_embedding_model().encode(question, convert_to_numpy=True).astype(np.float32)
+            q_norm = np.linalg.norm(q_vec) + 1e-9
+            cand_sub = candidates[:WEB_MMR_CANDIDATES]
+            vecs = vecs[:len(cand_sub)]
+            selected_idxs = []
+            remaining = list(range(len(cand_sub)))
+            lam = WEB_MMR_LAMBDA
+            while len(selected_idxs) < mmr_output_size and remaining:
+                best_i = -1
+                best_mmr = -1e9
+                for i in remaining:
+                    sim_q = np.dot(q_vec, vecs[i]) / (q_norm * (np.linalg.norm(vecs[i]) + 1e-9))
+                    if selected_idxs:
+                        max_sim = max(np.dot(vecs[i], vecs[j]) / ((np.linalg.norm(vecs[i]) + 1e-9) * (np.linalg.norm(vecs[j]) + 1e-9)) for j in selected_idxs)
+                        mmr = lam * sim_q - (1.0 - lam) * max_sim
+                    else:
+                        mmr = sim_q
+                    if mmr > best_mmr:
+                        best_mmr = mmr
+                        best_i = i
+                if best_i < 0:
+                    break
+                selected_idxs.append(best_i)
+                remaining.remove(best_i)
+            candidates = [cand_sub[i] for i in selected_idxs]
+        else:
+            candidates = candidates[:WEB_RERANKER_CANDIDATES]
+    elif WEB_USE_RERANKER or WEB_USE_MMR:
+        candidates = candidates[:WEB_RERANKER_CANDIDATES]
+    # Cross-encoder reranker: rerank candidates and take top
+    if WEB_USE_RERANKER and len(candidates) > top_n:
+        candidates = _rerank_chunks(question, candidates)
+    # Apply max_per_doc and take top_n
     doc_count = {}
     selected = []
-    for _sc, chunk_text, idx, url, title in scored:
+    for chunk_text, idx, url, title in candidates:
         if len(selected) >= top_n:
             break
         if doc_count.get(idx, 0) >= max_per_doc:
@@ -807,10 +1017,18 @@ def summarize_web_results_with_gemini(question: str, results: list) -> tuple:
         candidates_limit = min(len(results), WEB_FETCH_CANDIDATES_MAX)
         to_process = results[:candidates_limit]
         # 0 = fetch all candidates; else cap at WEB_FETCH_POOL_SIZE
-        pool_size = len(to_process) if WEB_FETCH_POOL_SIZE <= 0 else min(WEB_FETCH_POOL_SIZE, len(to_process))
-        to_fetch = [(idx, to_process[idx]) for idx in range(pool_size) if (to_process[idx].get("url") or "").startswith("http")]
+        # Two-stage: when chunk mode + WEB_FETCH_TOP_DOCS, pick top docs by title+snippet+url first, then fetch only those
+        if WEB_SELECT_BY_CHUNKS and WEB_FETCH_TOP_DOCS > 0:
+            doc_indices = _select_docs_for_fetch(question, to_process, WEB_FETCH_TOP_DOCS)
+            to_fetch = [(idx, to_process[idx]) for idx in doc_indices if (to_process[idx].get("url") or "").startswith("http")]
+            if to_fetch:
+                print(f"[WEB] Stage 1: selected {len(to_fetch)} docs by title+snippet+url; fetching full text (timeout 10s each)...")
+        else:
+            pool_size = len(to_process) if WEB_FETCH_POOL_SIZE <= 0 else min(WEB_FETCH_POOL_SIZE, len(to_process))
+            to_fetch = [(idx, to_process[idx]) for idx in range(pool_size) if (to_process[idx].get("url") or "").startswith("http")]
+            if to_fetch:
+                print(f"[WEB] Fetching pool of {len(to_fetch)} full page(s) from {len(to_process)} candidates (timeout 10s each)...")
         if to_fetch:
-            print(f"[WEB] Fetching pool of {len(to_fetch)} full page(s) from {len(to_process)} candidates (timeout 10s each)...")
             def fetch_one(args):
                 idx, item = args
                 url = item.get("url", "")
@@ -822,7 +1040,7 @@ def summarize_web_results_with_gemini(question: str, results: list) -> tuple:
                         fetched[idx] = text
             if fetched:
                 if WEB_SELECT_BY_CHUNKS:
-                    print(f"[WEB] Fetched {len(fetched)} page(s); chunking and selecting best {WEB_FETCH_TOP_N} chunks by semantic + BM25.")
+                    print(f"[WEB] Fetched {len(fetched)} page(s); splitting by modda/chunks, selecting best {WEB_FETCH_TOP_N} by semantic + BM25.")
                     selected_items = _select_chunks_for_context(question, to_process, fetched, top_n=WEB_FETCH_TOP_N)
                 else:
                     print(f"[WEB] Fetched {len(fetched)} page(s); selecting best {WEB_FETCH_TOP_N} by semantic + BM25 on full text.")
