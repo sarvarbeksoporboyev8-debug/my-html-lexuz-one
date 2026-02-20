@@ -56,8 +56,12 @@ WEB_CONTEXT_MAX_CHARS = _env_int("WEB_CONTEXT_MAX_CHARS", 3500 if LOW_COST_MODE 
 # Optional: fetch full page content for top N results so Gemini reads actual articles (deeper answers)
 WEB_FETCH_FULL_PAGES = _env_bool("WEB_FETCH_FULL_PAGES", False)
 WEB_FETCH_TOP_N = _env_int("WEB_FETCH_TOP_N", 5)
-# How many documents to fetch in full for selection; we then pick best WEB_FETCH_TOP_N by BM25 on full text (Python). Default = all candidates.
+# How many documents to fetch in full for selection; we then pick best WEB_FETCH_TOP_N (Python). Default = all candidates.
 WEB_FETCH_POOL_SIZE = _env_int("WEB_FETCH_POOL_SIZE", 60)
+# Use embedding similarity (semantic) in addition to BM25 for document selection; set 0 to use BM25 only
+WEB_USE_EMBEDDINGS = _env_bool("WEB_USE_EMBEDDINGS", True)
+# Weight for embedding score in [0,1]; BM25 weight = 1 - WEB_EMBEDDING_WEIGHT (semantic vs keyword)
+WEB_EMBEDDING_WEIGHT = max(0.0, min(1.0, float(os.getenv("WEB_EMBEDDING_WEIGHT", "0.7"))))
 # Max merged results to consider for the fetch pool (so we run BM25 over many docs, not just first WEB_MAX_RESULTS)
 WEB_FETCH_CANDIDATES_MAX = _env_int("WEB_FETCH_CANDIDATES_MAX", 60)
 WEB_FETCH_MAX_CHARS_PER_PAGE = _env_int("WEB_FETCH_MAX_CHARS_PER_PAGE", 2500)
@@ -432,13 +436,58 @@ def _domain_bonus(url: str) -> float:
     return 0.0
 
 
+_embedding_model = None
+_embedding_model_name = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+# Max chars per doc for embedding (avoids huge inputs; full text already truncated by WEB_FETCH_MAX_CHARS_PER_PAGE)
+_EMBEDDING_MAX_CHARS = 8000
+
+
+def _get_embedding_model():
+    """Lazy-load multilingual sentence-transformers model for semantic similarity."""
+    global _embedding_model
+    if _embedding_model is not None:
+        return _embedding_model
+    if not WEB_USE_EMBEDDINGS:
+        return None
+    try:
+        from sentence_transformers import SentenceTransformer
+        _embedding_model = SentenceTransformer(_embedding_model_name)
+        return _embedding_model
+    except Exception as e:
+        print(f"[WEB] Embeddings disabled (model load failed: {e}); using BM25 only.")
+        return None
+
+
+def _embedding_similarities(question: str, doc_texts: list) -> list:
+    """Return list of cosine similarities (question vs each doc). Returns [] on failure or when embeddings disabled."""
+    model = _get_embedding_model()
+    if model is None or not doc_texts:
+        return []
+    try:
+        import numpy as np
+        q_trim = (question or "")[:_EMBEDDING_MAX_CHARS]
+        docs_trim = [(t or "")[:_EMBEDDING_MAX_CHARS] for t in doc_texts]
+        q_enc = model.encode(q_trim, convert_to_numpy=True, show_progress_bar=False)
+        doc_enc = model.encode(docs_trim, convert_to_numpy=True, show_progress_bar=False)
+        sims = []
+        for d in doc_enc:
+            nq, nd = np.linalg.norm(q_enc), np.linalg.norm(d)
+            s = (np.dot(q_enc, d) / (nq * nd + 1e-9)).item() if (nq > 1e-9 and nd > 1e-9) else 0.0
+            sims.append(s)
+        return sims
+    except Exception as e:
+        print(f"[WEB] Embedding similarity failed: {e}; falling back to BM25.")
+        return []
+
+
 def _select_for_full_fetch(question: str, results: list, top_n: int, max_per_domain: int = 2, fetched_full: dict = None) -> list:
-    """Choose up to top_n results by relevance to the question. Uses BM25 on full document text when fetched_full is provided (idx -> full text), else title+snippet only. Domain bonus + diversity."""
+    """Choose up to top_n results by relevance: semantic (embedding) + BM25 when available; domain bonus + diversity."""
     if top_n <= 0 or not results:
         return []
     q_tokens = _tokenize_for_relevance(question)
-    # Build doc texts: when fetched_full is provided, only consider those indices and use full text for BM25
+    # Build doc texts and token lists (same order for BM25 and embeddings)
     doc_token_lists = []
+    doc_texts_for_emb = []
     for idx, item in enumerate(results):
         url = item.get("url") or ""
         if not url.startswith("http"):
@@ -451,22 +500,39 @@ def _select_for_full_fetch(question: str, results: list, top_n: int, max_per_dom
         text = f"{title} {snippet} {full_text}".strip()
         tokens = _tokenize_for_relevance(text)
         doc_token_lists.append((idx, tokens, url))
+        doc_texts_for_emb.append(text)
     if not doc_token_lists:
         return []
     n_docs = len(doc_token_lists)
-    # Document frequency for each term (over our result set)
     doc_freq = Counter()
     for _idx, tokens, _url in doc_token_lists:
         for t in set(tokens):
             doc_freq[t] += 1
-    # Score each doc: BM25 relevance + domain bonus
-    scored = []
+    # BM25 scores (relevance only, no domain bonus yet)
+    bm25_scores = []
     for idx, tokens, url in doc_token_lists:
         rel = _relevance_score_bm25(q_tokens, tokens, doc_freq, n_docs)
-        bonus = _domain_bonus(url)
-        scored.append((rel + bonus, idx, url))
+        bm25_scores.append(rel)
+    # Normalize BM25 to [0, 1]
+    bm_min, bm_max = min(bm25_scores), max(bm25_scores)
+    bm_range = (bm_max - bm_min) + 1e-9
+    bm25_norm = [(s - bm_min) / bm_range for s in bm25_scores]
+    # Embedding similarities (semantic); normalize to [0, 1]
+    emb_sims = _embedding_similarities(question, doc_texts_for_emb)
+    if emb_sims and len(emb_sims) == len(doc_token_lists):
+        # cosine in [-1,1] -> [0,1]
+        emb_norm = [(s + 1.0) / 2.0 for s in emb_sims]
+    else:
+        emb_norm = None
+    # Combined score: alpha * embedding + (1-alpha) * BM25 + domain bonus
+    alpha = WEB_EMBEDDING_WEIGHT if emb_norm is not None else 0.0
+    scored = []
+    for i, (idx, _tokens, url) in enumerate(doc_token_lists):
+        bm = bm25_norm[i]
+        em = emb_norm[i] if emb_norm is not None else bm
+        combined = alpha * em + (1.0 - alpha) * bm + _domain_bonus(url)
+        scored.append((combined, idx, url))
     scored.sort(key=lambda x: (-x[0], x[1]))
-    # Select top_n with max_per_domain per domain
     def domain(u):
         try:
             return (urlparse(u).netloc or "").lower()
@@ -640,7 +706,7 @@ def summarize_web_results_with_gemini(question: str, results: list) -> str:
                     if text:
                         fetched[idx] = text
             if fetched:
-                print(f"[WEB] Fetched {len(fetched)} page(s); selecting best {WEB_FETCH_TOP_N} by BM25 on full text.")
+                print(f"[WEB] Fetched {len(fetched)} page(s); selecting best {WEB_FETCH_TOP_N} by semantic + BM25 on full text.")
                 selected_indices = _select_for_full_fetch(question, to_process, WEB_FETCH_TOP_N, fetched_full=fetched)
                 fetched = {i: fetched[i] for i in selected_indices if i in fetched}
                 selected_items = [(to_process[i], fetched.get(i, "")) for i in selected_indices]
