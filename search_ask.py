@@ -379,18 +379,16 @@ def rewrite_query_with_perplexity(question: str) -> str:
     if not PERPLEXITY_API_KEY:
         return None
 
-    system_prompt = """Siz web qidiruv uchun query optimizatorisiz.
-Faqat bitta qidiruv so'rovini qaytaring.
-Qo'shimcha izoh bermang.
-So'rovni 8-16 so'z atrofida qiling.
-Kerak bo'lsa Uzbek + English kalit so'zlarni aralashtiring."""
+    system_prompt = """You output a single search query for Google/DuckDuckGo. Rules:
+- One line only, no explanation. No quotes or prefixes.
+- Use key phrases and keywords, not full sentences. 6–12 words.
+- Include "O'zbekiston" (or Uzbekistan) when the question is about Uzbekistan to get local sources.
+- Prefer terms that appear on official sites: qonun, reklama, litsenziya, maktab, ruxsat, tartib, qoidalar, lex.uz."""
 
-    site_hint = "\nMUHIM: Query lex.uz bilan cheklansin, ya'ni \"site:lex.uz\" operatori qatnashsin.\n" if WEB_SEARCH_SITE_FILTER_ENABLED else "\n"
-    user_prompt = f"""Quyidagi savol uchun Google/DuckDuckGo'da yaxshi natija beradigan aniq qidiruv query yozing:
+    site_hint = "\nInclude site:lex.uz in the query.\n" if WEB_SEARCH_SITE_FILTER_ENABLED else ""
+    user_prompt = f"""Write one search query that will find the best results for this question. Output only the query.{site_hint}
 
-{question}
-{site_hint}
-Faqat query qaytaring."""
+Question: {question}"""
 
     try:
         resp = requests.post(
@@ -417,6 +415,9 @@ Faqat query qaytaring."""
         data = resp.json()
         rewritten = data["choices"][0]["message"]["content"].strip()
         rewritten = rewritten.split("\n")[0].strip().strip('"').strip("'")
+        # Trim trailing question markers so the query is more keyword-like for search
+        while rewritten and rewritten[-1] in "?؟":
+            rewritten = rewritten[:-1].strip()
         if rewritten and WEB_SEARCH_SITE_FILTER_ENABLED and WEB_SEARCH_SITE_FILTER not in rewritten:
             rewritten = f"{WEB_SEARCH_SITE_FILTER} {rewritten}".strip()
         return rewritten if rewritten else None
@@ -424,6 +425,57 @@ Faqat query qaytaring."""
     except Exception as e:
         print(f"[PERPLEXITY-REWRITE] Failed: {e}")
         return None
+
+
+def rewrite_queries_with_perplexity(question: str, max_queries: int = 5) -> list:
+    """Ask Perplexity for multiple targeted search queries (like Google AI's approach). Returns list of query strings."""
+    if not PERPLEXITY_API_KEY:
+        return []
+
+    system_prompt = """You are a search strategist. Output 4–5 different Google/DuckDuckGo search queries that together will find the best information for the user's question. The topic is whatever the user asks about (do not assume crypto, finance, or any specific domain). Vary the angle: e.g. relevant law/regulation, specific entities or bodies mentioned, restrictions or permissions, official sources (lex.uz, gov.uz, NAPP when relevant). Use Uzbek and English keywords appropriate to the question. One query per line. No numbering, bullets, or explanation. 6–12 words per query."""
+
+    user_prompt = f"""Question: {question}
+
+Output 4–5 search queries (one per line) that would cross-reference the right laws, entities, and official sources to answer this question accurately. Base the queries only on the question above."""
+
+    try:
+        resp = requests.post(
+            "https://api.perplexity.ai/chat/completions",
+            headers={
+                "Authorization": f"Bearer {PERPLEXITY_API_KEY}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": "sonar",
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                "max_tokens": min(220, PERPLEXITY_REWRITE_MAX_TOKENS * 2),
+            },
+            timeout=25,
+        )
+        if resp.status_code != 200:
+            print(f"[PERPLEXITY-REWRITE] Error: {resp.status_code}")
+            return []
+        data = resp.json()
+        text = data["choices"][0]["message"]["content"].strip()
+        lines = [ln.strip().strip('"\'').strip() for ln in text.split("\n") if ln.strip()]
+        out = []
+        for ln in lines:
+            while ln and ln[-1] in "?؟":
+                ln = ln[:-1].strip()
+            if not ln or len(ln) < 4:
+                continue
+            if WEB_SEARCH_SITE_FILTER_ENABLED and WEB_SEARCH_SITE_FILTER not in ln:
+                ln = f"{WEB_SEARCH_SITE_FILTER} {ln}".strip()
+            out.append(ln)
+            if len(out) >= max_queries:
+                break
+        return out
+    except Exception as e:
+        print(f"[PERPLEXITY-REWRITE] Failed: {e}")
+        return []
 
 
 def summarize_web_results_with_gemini(question: str, results: list) -> str:
@@ -1145,19 +1197,24 @@ def search_ask_with_provider(question: str, history: list = None) -> tuple[str, 
     print("\n[WEB] Searching top web results (DuckDuckGo)...")
     web_results = search_web_top_results(question, max_results=WEB_MAX_RESULTS)
 
-    # 1b. Always try Perplexity rewrite + second search when available; merge and prefer .uz/lex.uz sources
+    # 1b. Multiple targeted queries (like Google AI): Perplexity suggests 4–5 angles; we run each and merge
     if PERPLEXITY_API_KEY:
-        print(f"[WEB] Rewriting query with Perplexity (max_tokens={PERPLEXITY_REWRITE_MAX_TOKENS})...")
-        rewritten_query = rewrite_query_with_perplexity(question)
-        if rewritten_query:
+        print("[WEB] Generating multiple targeted search queries (Perplexity)...")
+        extra_queries = rewrite_queries_with_perplexity(question, max_queries=5)
+        if extra_queries:
             if WEB_SEARCH_RETRY_DELAY > 0:
-                print(f"[WEB] Waiting {WEB_SEARCH_RETRY_DELAY}s before second DuckDuckGo attempt...")
                 time.sleep(WEB_SEARCH_RETRY_DELAY)
-            print(f"[WEB] Second search with rewritten query: {rewritten_query}")
-            second_results = search_web_top_results(rewritten_query, max_results=WEB_MAX_RESULTS)
-            if second_results:
-                web_results = _merge_web_results(web_results or [], second_results, prefer_uz=True)
-                print(f"[WEB] Merged {len(web_results)} results (Uzbek/lex.uz sources preferred).")
+            all_results = list(web_results) if web_results else []
+            for i, q in enumerate(extra_queries):
+                print(f"[WEB] Targeted search {i+1}/{len(extra_queries)}: {q[:60]}{'...' if len(q) > 60 else ''}")
+                part = search_web_top_results(q, max_results=WEB_MAX_RESULTS)
+                if part:
+                    all_results = _merge_web_results(all_results, part, prefer_uz=True)
+                if i < len(extra_queries) - 1 and WEB_SEARCH_RETRY_DELAY > 0:
+                    time.sleep(WEB_SEARCH_RETRY_DELAY)
+            if all_results:
+                web_results = all_results
+                print(f"[WEB] Merged {len(web_results)} results (Uzbek/lex.uz preferred).")
 
     if web_results:
         gemini_summary = summarize_web_results_with_gemini(question, web_results)
