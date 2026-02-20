@@ -112,20 +112,20 @@ def extract_domain_label(url: str) -> str:
 
 
 def _search_web_ddgs(query: str, max_results: int) -> list:
-    """Primary DuckDuckGo path: use duckduckgo-search package (avoids CAPTCHA/HTML parsing)."""
+    """Primary DuckDuckGo path: use ddgs package (avoids CAPTCHA/HTML parsing)."""
     try:
-        from duckduckgo_search import DDGS
+        from ddgs import DDGS
         proxies = _get_brightdata_proxies()
         proxy_url = proxies.get("https") or proxies.get("http") if proxies else None
         if proxy_url:
             print("[WEB] Using Bright Data proxy for DuckDuckGo.")
-        ddgs = DDGS(proxy=proxy_url, timeout=30) if proxy_url else DDGS(timeout=30)
-        raw = ddgs.text(query, max_results=max_results)
+        client = DDGS(proxy=proxy_url, timeout=30) if proxy_url else DDGS(timeout=30)
+        raw = client.text(query, max_results=max_results)
         results = list(raw) if raw else []
     except ImportError:
         return []
     except Exception as e:
-        print(f"[WEB] duckduckgo-search failed: {e}")
+        print(f"[WEB] ddgs failed: {e}")
         return []
     if not results:
         return []
@@ -146,7 +146,7 @@ def _search_web_ddgs(query: str, max_results: int) -> list:
             "label": extract_domain_label(url),
         })
     if out:
-        print(f"[WEB] DuckDuckGo (duckduckgo-search): {len(out)} results.")
+        print(f"[WEB] DuckDuckGo (ddgs): {len(out)} results.")
     return out
 
 

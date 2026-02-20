@@ -16,5 +16,5 @@ pymupdf>=1.22.0
 pytesseract>=0.3.10
 pillow>=9.0.0
 
-# DuckDuckGo search (primary path in search_ask.py)
-duckduckgo-search>=7.0.0
+# DuckDuckGo search (primary path in search_ask.py; duckduckgo-search was renamed to ddgs)
+ddgs>=9.0.0
