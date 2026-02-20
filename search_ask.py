@@ -1781,7 +1781,7 @@ Tegishli savollar:
 
 def search_ask_with_provider(question: str, history: list = None) -> tuple[str, str, list]:
     """Main function with provider metadata.
-    Priority: 1=DuckDuckGo (web), 2=Gemini, 3=Perplexity.
+    Priority: 1=Perplexity API, 2=DuckDuckGo (web)+Gemini, 3=Gemini Search Grounding.
     Returns (answer, provider, chosen_chunks). chosen_chunks is list of {title, url, chunk_text} or None.
     """
     print(f"\n{'='*60}")
@@ -1789,12 +1789,19 @@ def search_ask_with_provider(question: str, history: list = None) -> tuple[str, 
     if history:
         print(f"HISTORY: {len(history)} messages")
     print('='*60)
-    
-    # 1. DUCKDUCKGO (priority 1) - Top web results
+
+    # 1. PERPLEXITY (priority 1) - Try first to assess quality
+    if PERPLEXITY_API_KEY:
+        print("\n[PERPLEXITY] Using Perplexity API (priority 1)...")
+        answer = ask_perplexity(question)
+        if answer:
+            return answer, "perplexity", None
+        print("[PERPLEXITY] Failed, trying Web+Gemini...")
+
+    # 2. DUCKDUCKGO + GEMINI (priority 2) - Top web results + summarize
     print("\n[WEB] Searching top web results (DuckDuckGo)...")
     web_results = search_web_top_results(question, max_results=WEB_MAX_RESULTS)
 
-    # 1b. Multiple targeted queries (like Google AI): Perplexity suggests 4–5 angles; we run each and merge
     if PERPLEXITY_API_KEY:
         print("[WEB] Generating multiple targeted search queries (Perplexity)...")
         extra_queries = rewrite_queries_with_perplexity(question, max_queries=5)
@@ -1824,29 +1831,21 @@ def search_ask_with_provider(question: str, history: list = None) -> tuple[str, 
             return gemini_summary, "web+gemini", chosen_chunks
         return build_web_results_fallback_answer(web_results), "web-search", None
 
-    print("[WEB] No results, trying Gemini (priority 2)...")
+    print("[WEB] No results, trying Gemini (priority 3)...")
 
-    # 2. GEMINI (priority 2) - Google AI with Search Grounding
+    # 3. GEMINI (priority 3) - Google AI with Search Grounding
     if GEMINI_API_KEY:
         print("\n[GEMINI] Using Google Gemini with Search Grounding...")
         answer = ask_gemini_grounded(question, history=history)
         if answer:
             return answer, "gemini", None
-        print("[GEMINI] Failed, trying Perplexity...")
-    
-    # 3. PERPLEXITY (priority 3) - Final fallback
-    if PERPLEXITY_API_KEY:
-        print("\n[PERPLEXITY] Using Perplexity API...")
-        answer = ask_perplexity(question)
-        if answer:
-            return answer, "perplexity", None
-        print("[PERPLEXITY] Failed")
+        print("[GEMINI] Failed")
 
-    return "Javob topilmadi. Web/Gemini/Perplexity manbalaridan javob olib bo'lmadi.", "none", None
+    return "Javob topilmadi. Perplexity/Web/Gemini manbalaridan javob olib bo'lmadi.", "none", None
 
 
 def search_ask(question: str, history: list = None) -> tuple[str, list]:
-    """Main function: priority 1=DuckDuckGo, 2=Gemini, 3=Perplexity. Returns (answer, chosen_chunks)."""
+    """Main function: priority 1=Perplexity, 2=Web+Gemini, 3=Gemini. Returns (answer, chosen_chunks)."""
     answer, _provider, chosen_chunks = search_ask_with_provider(question, history=history)
     return answer, chosen_chunks
 
