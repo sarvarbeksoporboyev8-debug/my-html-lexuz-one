@@ -56,8 +56,10 @@ WEB_CONTEXT_MAX_CHARS = _env_int("WEB_CONTEXT_MAX_CHARS", 3500 if LOW_COST_MODE 
 # Optional: fetch full page content for top N results so Gemini reads actual articles (deeper answers)
 WEB_FETCH_FULL_PAGES = _env_bool("WEB_FETCH_FULL_PAGES", False)
 WEB_FETCH_TOP_N = _env_int("WEB_FETCH_TOP_N", 5)
-# How many documents to fetch in full for selection; we then pick best WEB_FETCH_TOP_N by BM25 on full text (Python)
-WEB_FETCH_POOL_SIZE = _env_int("WEB_FETCH_POOL_SIZE", 15)
+# How many documents to fetch in full for selection; we then pick best WEB_FETCH_TOP_N by BM25 on full text (Python). Default = all candidates.
+WEB_FETCH_POOL_SIZE = _env_int("WEB_FETCH_POOL_SIZE", 60)
+# Max merged results to consider for the fetch pool (so we run BM25 over many docs, not just first WEB_MAX_RESULTS)
+WEB_FETCH_CANDIDATES_MAX = _env_int("WEB_FETCH_CANDIDATES_MAX", 60)
 WEB_FETCH_MAX_CHARS_PER_PAGE = _env_int("WEB_FETCH_MAX_CHARS_PER_PAGE", 2500)
 # DuckDuckGo rate-limit avoidance: retries and delay (seconds)
 WEB_SEARCH_RETRIES = _env_int("WEB_SEARCH_RETRIES", 3)
@@ -600,24 +602,28 @@ Output 4–5 search queries (one per line) that would cross-reference the right 
 
 def summarize_web_results_with_gemini(question: str, results: list) -> str:
     """Summarize fetched web results with Gemini, citing [1], [2], ... markers.
-    If WEB_FETCH_FULL_PAGES is True, fetches full page content for top N results in parallel so Gemini can read actual articles.
+    If WEB_FETCH_FULL_PAGES is True, fetches full page content for a pool from all merged results, then selects best N by BM25 on full text.
     """
     if not GEMINI_API_KEY or not results:
         return None
 
-    to_process = results[:WEB_MAX_RESULTS]
-    # Fetch a pool of full documents, then select best WEB_FETCH_TOP_N by BM25 on full text (Python)
     fetched = {}
+    selected_items = None  # when set, only these go to context (with ids 1..n)
+
     if WEB_FETCH_FULL_PAGES and WEB_FETCH_TOP_N > 0:
-        pool_size = max(WEB_FETCH_TOP_N, min(WEB_FETCH_POOL_SIZE, len(to_process)))
+        # Use full merged list (up to WEB_FETCH_CANDIDATES_MAX) for pool, not just first WEB_MAX_RESULTS
+        candidates_limit = min(len(results), WEB_FETCH_CANDIDATES_MAX)
+        to_process = results[:candidates_limit]
+        # 0 = fetch all candidates; else cap at WEB_FETCH_POOL_SIZE
+        pool_size = len(to_process) if WEB_FETCH_POOL_SIZE <= 0 else min(WEB_FETCH_POOL_SIZE, len(to_process))
         to_fetch = [(idx, to_process[idx]) for idx in range(pool_size) if (to_process[idx].get("url") or "").startswith("http")]
         if to_fetch:
-            print(f"[WEB] Fetching pool of {len(to_fetch)} full page(s) for relevance selection (timeout 10s each)...")
+            print(f"[WEB] Fetching pool of {len(to_fetch)} full page(s) from {len(to_process)} candidates (timeout 10s each)...")
             def fetch_one(args):
                 idx, item = args
                 url = item.get("url", "")
                 return idx, _fetch_page_text(url, WEB_FETCH_MAX_CHARS_PER_PAGE, timeout=10)
-            with ThreadPoolExecutor(max_workers=min(5, len(to_fetch))) as ex:
+            with ThreadPoolExecutor(max_workers=min(8, len(to_fetch))) as ex:
                 for result in ex.map(fetch_one, to_fetch):
                     idx, text = result
                     if text:
@@ -626,19 +632,35 @@ def summarize_web_results_with_gemini(question: str, results: list) -> str:
                 print(f"[WEB] Fetched {len(fetched)} page(s); selecting best {WEB_FETCH_TOP_N} by BM25 on full text.")
                 selected_indices = _select_for_full_fetch(question, to_process, WEB_FETCH_TOP_N, fetched_full=fetched)
                 fetched = {i: fetched[i] for i in selected_indices if i in fetched}
+                selected_items = [(to_process[i], fetched.get(i, "")) for i in selected_indices]
+    else:
+        to_process = results[:WEB_MAX_RESULTS]
 
     context_lines = []
     used_chars = 0
-    for idx, item in enumerate(to_process):
-        line = f"[{item['id']}] {item.get('title', '')}\nURL: {item.get('url', '')}\nSnippet: {item.get('snippet', '')}"
-        if idx in fetched and fetched[idx]:
-            line += f"\nFull text (excerpt): {fetched[idx]}"
-        if used_chars + len(line) > WEB_CONTEXT_MAX_CHARS:
-            line = line[: max(0, WEB_CONTEXT_MAX_CHARS - used_chars - 50)] + "\n..."
-        context_lines.append(line)
-        used_chars += len(line)
-        if used_chars >= WEB_CONTEXT_MAX_CHARS:
-            break
+    if selected_items is not None:
+        # Context = only the 5 selected documents (each with full text), ids [1]..[5]
+        for num, (item, full_text) in enumerate(selected_items, 1):
+            line = f"[{num}] {item.get('title', '')}\nURL: {item.get('url', '')}\nSnippet: {item.get('snippet', '')}"
+            if full_text:
+                line += f"\nFull text (excerpt): {full_text}"
+            if used_chars + len(line) > WEB_CONTEXT_MAX_CHARS:
+                line = line[: max(0, WEB_CONTEXT_MAX_CHARS - used_chars - 50)] + "\n..."
+            context_lines.append(line)
+            used_chars += len(line)
+            if used_chars >= WEB_CONTEXT_MAX_CHARS:
+                break
+    else:
+        for idx, item in enumerate(to_process):
+            line = f"[{item['id']}] {item.get('title', '')}\nURL: {item.get('url', '')}\nSnippet: {item.get('snippet', '')}"
+            if idx in fetched and fetched.get(idx):
+                line += f"\nFull text (excerpt): {fetched[idx]}"
+            if used_chars + len(line) > WEB_CONTEXT_MAX_CHARS:
+                line = line[: max(0, WEB_CONTEXT_MAX_CHARS - used_chars - 50)] + "\n..."
+            context_lines.append(line)
+            used_chars += len(line)
+            if used_chars >= WEB_CONTEXT_MAX_CHARS:
+                break
 
     prompt = f"""Siz O'zbekiston huquqiy masalalari bo'yicha yordamchi AI siz.
 
