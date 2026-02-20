@@ -53,6 +53,9 @@ WEB_CONTEXT_MAX_CHARS = _env_int("WEB_CONTEXT_MAX_CHARS", 3500 if LOW_COST_MODE 
 WEB_SEARCH_RETRIES = _env_int("WEB_SEARCH_RETRIES", 3)
 WEB_SEARCH_RETRY_DELAY = _env_int("WEB_SEARCH_RETRY_DELAY", 2)
 WEB_SEARCH_INITIAL_DELAY = _env_int("WEB_SEARCH_INITIAL_DELAY", 1)
+# Debug: save DuckDuckGo HTML when 200 but 0 results (to inspect CAPTCHA vs no-results page)
+WEB_DEBUG_SAVE_HTML = _env_bool("WEB_DEBUG_SAVE_HTML", False)
+WEB_DEBUG_SAVE_HTML_PATH = os.getenv("WEB_DEBUG_SAVE_HTML_PATH", "debug_duckduckgo_last.html")
 GEMINI_WEB_SUMMARY_MAX_OUTPUT_TOKENS = _env_int("GEMINI_WEB_SUMMARY_MAX_OUTPUT_TOKENS", 600 if LOW_COST_MODE else 1200)
 PERPLEXITY_REWRITE_MAX_TOKENS = _env_int("PERPLEXITY_REWRITE_MAX_TOKENS", 80 if LOW_COST_MODE else 100)
 PERPLEXITY_ANSWER_MAX_TOKENS = _env_int("PERPLEXITY_ANSWER_MAX_TOKENS", 1600 if LOW_COST_MODE else 4000)
@@ -100,6 +103,40 @@ def extract_domain_label(url: str) -> str:
         return host or "web"
     except:
         return "web"
+
+
+def _search_web_fallback_ddgs(query: str, max_results: int) -> list:
+    """Optional fallback: use duckduckgo-search package if installed (handles CAPTCHA/HTML better)."""
+    try:
+        from duckduckgo_search import DDGS
+        raw = DDGS().text(query, max_results=max_results)
+        results = list(raw) if raw else []
+    except ImportError:
+        return []
+    except Exception as e:
+        print(f"[WEB] duckduckgo-search fallback failed: {e}")
+        return []
+    if not results:
+        return []
+    out = []
+    seen = set()
+    for i, r in enumerate(results[:max_results], 1):
+        url = r.get("href") or r.get("url") or ""
+        if not url or url in seen:
+            continue
+        seen.add(url)
+        title = (r.get("title") or "")[:WEB_TITLE_MAX_CHARS]
+        snippet = (r.get("body") or r.get("snippet") or "")[:WEB_SNIPPET_MAX_CHARS]
+        out.append({
+            "id": i,
+            "title": title or extract_title_from_url(url),
+            "url": url,
+            "snippet": snippet,
+            "label": extract_domain_label(url),
+        })
+    if out:
+        print(f"[WEB] duckduckgo-search fallback returned {len(out)} results.")
+    return out
 
 
 # Headers that look like a real browser to reduce DuckDuckGo rate limiting / 202
@@ -198,6 +235,21 @@ def search_web_top_results(query: str, max_results: int = 8) -> list:
 
             if len(results) >= effective_max_results:
                 break
+
+        if not results:
+            # 200 OK but no .result elements: often CAPTCHA, "no results" page, or HTML change
+            print("[WEB] DuckDuckGo returned 200 but no results (possible CAPTCHA or empty for this query).")
+            if WEB_DEBUG_SAVE_HTML:
+                try:
+                    path = os.path.abspath(WEB_DEBUG_SAVE_HTML_PATH)
+                    with open(path, "w", encoding="utf-8") as f:
+                        f.write(f"<!-- query: {final_query!r}\n")
+                        f.write(f"     saved: {time.strftime('%Y-%m-%d %H:%M:%S UTC', time.gmtime())} -->\n")
+                        f.write(resp.text)
+                    print(f"[WEB] Debug: saved response to {path}")
+                except Exception as e:
+                    print(f"[WEB] Debug save failed: {e}")
+            results = _search_web_fallback_ddgs(final_query, effective_max_results)
 
         return results
 

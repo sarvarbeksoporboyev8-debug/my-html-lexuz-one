@@ -15,3 +15,7 @@ pymupdf>=1.22.0
 # OCR
 pytesseract>=0.3.10
 pillow>=9.0.0
+
+# Optional: better DuckDuckGo results when HTML scrape returns empty (CAPTCHA/narrow query)
+# pip install duckduckgo-search
+# duckduckgo-search>=7.0.0
