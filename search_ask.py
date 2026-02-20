@@ -14,6 +14,7 @@ import json
 import re
 import time
 import requests
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import urlparse, parse_qs, unquote, quote
 from bs4 import BeautifulSoup
 
@@ -379,7 +380,7 @@ def _merge_web_results(first: list, second: list, prefer_uz: bool = True) -> lis
     return out
 
 
-def _fetch_page_text(url: str, max_chars: int, timeout: int = 15) -> str:
+def _fetch_page_text(url: str, max_chars: int, timeout: int = 10) -> str:
     """Fetch URL and return plain text (body), truncated to max_chars. Returns '' on failure."""
     try:
         proxies = _get_brightdata_proxies()
@@ -410,7 +411,7 @@ def rewrite_query_with_perplexity(question: str) -> str:
 - One line only, no explanation. No quotes or prefixes.
 - Use key phrases and keywords, not full sentences. 6–12 words.
 - Include "O'zbekiston" (or Uzbekistan) when the question is about Uzbekistan to get local sources.
-- Prefer terms that appear on official sites: qonun, reklama, litsenziya, maktab, ruxsat, tartib, qoidalar, lex.uz."""
+- Use terms that appear on official sources (e.g. qonun, tartib, qoidalar, ruxsat, davlat organlari, lex.uz) as appropriate to the question topic."""
 
     site_hint = "\nInclude site:lex.uz in the query.\n" if WEB_SEARCH_SITE_FILTER_ENABLED else ""
     user_prompt = f"""Write one search query that will find the best results for this question. Output only the query.{site_hint}
@@ -507,24 +508,36 @@ Output 4–5 search queries (one per line) that would cross-reference the right 
 
 def summarize_web_results_with_gemini(question: str, results: list) -> str:
     """Summarize fetched web results with Gemini, citing [1], [2], ... markers.
-    If WEB_FETCH_FULL_PAGES is True, fetches full page content for top N results so Gemini can read actual articles.
+    If WEB_FETCH_FULL_PAGES is True, fetches full page content for top N results in parallel so Gemini can read actual articles.
     """
     if not GEMINI_API_KEY or not results:
         return None
 
+    to_process = results[:WEB_MAX_RESULTS]
+    # Pre-fetch full page text in parallel (avoids 5 × 10s sequential wait)
+    fetched = {}
+    if WEB_FETCH_FULL_PAGES and WEB_FETCH_TOP_N > 0:
+        to_fetch = [(idx, item) for idx, item in enumerate(to_process) if idx < WEB_FETCH_TOP_N and item.get("url", "").startswith("http")]
+        if to_fetch:
+            print(f"[WEB] Fetching {len(to_fetch)} full page(s) in parallel (timeout 10s each)...")
+            def fetch_one(args):
+                idx, item = args
+                url = item.get("url", "")
+                return idx, _fetch_page_text(url, WEB_FETCH_MAX_CHARS_PER_PAGE, timeout=10)
+            with ThreadPoolExecutor(max_workers=min(5, len(to_fetch))) as ex:
+                for result in ex.map(fetch_one, to_fetch):
+                    idx, text = result
+                    if text:
+                        fetched[idx] = text
+            if fetched:
+                print(f"[WEB] Fetched {len(fetched)} page(s) for deeper context.")
+
     context_lines = []
     used_chars = 0
-    to_process = results[:WEB_MAX_RESULTS]
     for idx, item in enumerate(to_process):
         line = f"[{item['id']}] {item.get('title', '')}\nURL: {item.get('url', '')}\nSnippet: {item.get('snippet', '')}"
-        if WEB_FETCH_FULL_PAGES and idx < WEB_FETCH_TOP_N:
-            url = item.get("url", "")
-            if url and url.startswith("http"):
-                full = _fetch_page_text(url, WEB_FETCH_MAX_CHARS_PER_PAGE)
-                if full:
-                    line += f"\nFull text (excerpt): {full}"
-                    if idx == 0:
-                        print("[WEB] Fetched full page(s) for deeper context.")
+        if idx in fetched and fetched[idx]:
+            line += f"\nFull text (excerpt): {fetched[idx]}"
         if used_chars + len(line) > WEB_CONTEXT_MAX_CHARS:
             line = line[: max(0, WEB_CONTEXT_MAX_CHARS - used_chars - 50)] + "\n..."
         context_lines.append(line)
@@ -574,7 +587,7 @@ Tegishli savollar:
                         "maxOutputTokens": GEMINI_WEB_SUMMARY_MAX_OUTPUT_TOKENS,
                     },
                 },
-                timeout=30,
+                timeout=90,
             )
 
             if resp.status_code == 429:
@@ -618,26 +631,22 @@ def build_web_results_fallback_answer(results: list) -> str:
         "",
         "Tegishli savollar:",
         "- Shu mavzuga oid aniq normativ hujjat qaysi?",
-        "- Maktab hududida reklama bo'yicha alohida cheklovlar bormi?",
-        "- Kripto xizmatlar logotipidan foydalanish uchun ruxsat talab qilinadimi?",
-        "- Voyaga yetmaganlarga qaratilgan reklama bo'yicha talablar qanday?",
+        "- Bu sohada qanday cheklovlar yoki talablar mavjud?",
         "- Qaysi davlat organi bu masalani nazorat qiladi?",
+        "- Tegishli qonun yoki qoidalar qachon kuchga kirgan?",
+        "- Amaliyotda qanday qo'llaniladi?",
     ]
     return "\n".join(lines)
 
 
 def build_perplexity_multisearch_question(question: str) -> str:
-    """Build a Perplexity prompt that forces multiple targeted search passes."""
+    """Build a Perplexity prompt that forces multiple targeted search passes. Topic-agnostic."""
     return f"""O'zbekiston qonunchiligi bo'yicha savol: {question}
 
 QIDIRUV STRATEGIYASI (MAJBURIY):
 1) Kamida 3-4 ta alohida qidiruv o'tkazing (turli kalit so'zlar bilan)
-2) Faqat lex.uz manbalariga tayaning
-3) Qidiruv yo'nalishlari:
-   - Ta'lim/maktab hududida reklama yoki axborot materiallari talablari
-   - Kripto-aktivlar/kripto-depozitariy/reklama yoki ommaviy targ'ibotga oid normalar
-   - Voyaga yetmaganlar, iste'molchilarni himoya qilish yoki moliyaviy xizmat reklama cheklovlari
-   - Davlat organlari vakolati va javobgarlik normalari
+2) lex.uz va rasmiy manbalarga tayaning
+3) Savol mavzusiga qarab turli yo'nalishlarda qidiring: tegishli qonun/hujjatlar, cheklovlar yoki ruxsatlar, davlat organlari vakolati, nazorat talablari. Mavzuga mos kalit so'zlardan foydalaning.
 
 JAVOB QOIDALARI:
 - O'zbek tilida 2-4 paragraf aniq xulosa bering
