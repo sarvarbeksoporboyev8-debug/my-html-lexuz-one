@@ -48,7 +48,12 @@ LOW_COST_MODE = _env_bool("LOW_COST_MODE", True)
 WEB_MAX_RESULTS = _env_int("WEB_MAX_RESULTS", 4 if LOW_COST_MODE else 10)
 WEB_TITLE_MAX_CHARS = _env_int("WEB_TITLE_MAX_CHARS", 140 if LOW_COST_MODE else 180)
 WEB_SNIPPET_MAX_CHARS = _env_int("WEB_SNIPPET_MAX_CHARS", 220 if LOW_COST_MODE else 400)
-WEB_CONTEXT_MAX_CHARS = _env_int("WEB_CONTEXT_MAX_CHARS", 3500 if LOW_COST_MODE else 9000)
+# Context sent to Gemini: ~3.5k (low-cost) or ~32k so 20 results + 5 full-page excerpts can fit
+WEB_CONTEXT_MAX_CHARS = _env_int("WEB_CONTEXT_MAX_CHARS", 3500 if LOW_COST_MODE else 32000)
+# Optional: fetch full page content for top N results so Gemini reads actual articles (deeper answers)
+WEB_FETCH_FULL_PAGES = _env_bool("WEB_FETCH_FULL_PAGES", False)
+WEB_FETCH_TOP_N = _env_int("WEB_FETCH_TOP_N", 5)
+WEB_FETCH_MAX_CHARS_PER_PAGE = _env_int("WEB_FETCH_MAX_CHARS_PER_PAGE", 2500)
 # DuckDuckGo rate-limit avoidance: retries and delay (seconds)
 WEB_SEARCH_RETRIES = _env_int("WEB_SEARCH_RETRIES", 3)
 WEB_SEARCH_RETRY_DELAY = _env_int("WEB_SEARCH_RETRY_DELAY", 2)
@@ -374,6 +379,28 @@ def _merge_web_results(first: list, second: list, prefer_uz: bool = True) -> lis
     return out
 
 
+def _fetch_page_text(url: str, max_chars: int, timeout: int = 15) -> str:
+    """Fetch URL and return plain text (body), truncated to max_chars. Returns '' on failure."""
+    try:
+        proxies = _get_brightdata_proxies()
+        resp = requests.get(
+            url,
+            headers={"User-Agent": _DUCKDUCKGO_HEADERS.get("User-Agent", "Mozilla/5.0")},
+            proxies=proxies,
+            timeout=timeout,
+        )
+        if resp.status_code != 200:
+            return ""
+        soup = BeautifulSoup(resp.text, "lxml")
+        for tag in soup(["script", "style", "nav", "footer", "form"]):
+            tag.decompose()
+        text = soup.get_text(separator=" ", strip=True)
+        text = re.sub(r"\s+", " ", text)
+        return text[:max_chars] if text else ""
+    except Exception:
+        return ""
+
+
 def rewrite_query_with_perplexity(question: str) -> str:
     """Rewrite user question into a concise web-search query using Perplexity."""
     if not PERPLEXITY_API_KEY:
@@ -479,18 +506,31 @@ Output 4–5 search queries (one per line) that would cross-reference the right 
 
 
 def summarize_web_results_with_gemini(question: str, results: list) -> str:
-    """Summarize fetched web results with Gemini, citing [1], [2], ... markers."""
+    """Summarize fetched web results with Gemini, citing [1], [2], ... markers.
+    If WEB_FETCH_FULL_PAGES is True, fetches full page content for top N results so Gemini can read actual articles.
+    """
     if not GEMINI_API_KEY or not results:
         return None
 
     context_lines = []
     used_chars = 0
-    for item in results[:WEB_MAX_RESULTS]:
+    to_process = results[:WEB_MAX_RESULTS]
+    for idx, item in enumerate(to_process):
         line = f"[{item['id']}] {item.get('title', '')}\nURL: {item.get('url', '')}\nSnippet: {item.get('snippet', '')}"
+        if WEB_FETCH_FULL_PAGES and idx < WEB_FETCH_TOP_N:
+            url = item.get("url", "")
+            if url and url.startswith("http"):
+                full = _fetch_page_text(url, WEB_FETCH_MAX_CHARS_PER_PAGE)
+                if full:
+                    line += f"\nFull text (excerpt): {full}"
+                    if idx == 0:
+                        print("[WEB] Fetched full page(s) for deeper context.")
         if used_chars + len(line) > WEB_CONTEXT_MAX_CHARS:
-            break
+            line = line[: max(0, WEB_CONTEXT_MAX_CHARS - used_chars - 50)] + "\n..."
         context_lines.append(line)
         used_chars += len(line)
+        if used_chars >= WEB_CONTEXT_MAX_CHARS:
+            break
 
     prompt = f"""Siz O'zbekiston huquqiy masalalari bo'yicha yordamchi AI siz.
 
@@ -501,11 +541,11 @@ INTERNET MANBALARI (top natijalar):
 {chr(10).join(context_lines)}
 
 QOIDALAR:
-1. Faqat berilgan manbalarga tayangan holda javob bering
-2. O'zbek tilida yozing, 2-4 paragraf, aniq va qisqa
-3. Aniq, ishonchli tonda yozing. "Balki", "ehtimol", "tavsiya etiladi" kabi noaniq ifodalar ishlatmang; manbalarga asoslanib aniq xulosa bering
-4. Har paragraf oxirida [1], [2] kabi iqtibos raqamlarini qo'ying
-5. Taxmin qilmang; manbada bo'lmasa ochiq ayting
+1. Faqat berilgan manbalarga tayangan holda javob bering. Agar manbada "Full text (excerpt)" bo'lsa, shu matn asosida aniq va chuqur javob bering.
+2. O'zbek tilida yozing, 2-5 paragraf, aniq va asoslangan (snippetdan ko'ra to'liq matn bo'lsa batafsilroq yozing).
+3. Aniq, ishonchli tonda yozing. "Balki", "ehtimol", "tavsiya etiladi" kabi noaniq ifodalar ishlatmang; manbalarga asoslanib aniq xulosa bering.
+4. Har paragraf oxirida [1], [2] kabi iqtibos raqamlarini qo'ying.
+5. Taxmin qilmang; manbada bo'lmasa ochiq ayting.
 6. Oxirida quyidagi bo'limlarni yozing:
 
 Manbalar:
