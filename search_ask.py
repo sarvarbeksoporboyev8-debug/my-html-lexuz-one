@@ -11,9 +11,11 @@ Usage:
 import os
 import sys
 import json
+import math
 import re
 import time
 import requests
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import urlparse, parse_qs, unquote, quote
 from bs4 import BeautifulSoup
@@ -54,6 +56,8 @@ WEB_CONTEXT_MAX_CHARS = _env_int("WEB_CONTEXT_MAX_CHARS", 3500 if LOW_COST_MODE 
 # Optional: fetch full page content for top N results so Gemini reads actual articles (deeper answers)
 WEB_FETCH_FULL_PAGES = _env_bool("WEB_FETCH_FULL_PAGES", False)
 WEB_FETCH_TOP_N = _env_int("WEB_FETCH_TOP_N", 5)
+# How many documents to fetch in full for selection; we then pick best WEB_FETCH_TOP_N by BM25 on full text (Python)
+WEB_FETCH_POOL_SIZE = _env_int("WEB_FETCH_POOL_SIZE", 15)
 WEB_FETCH_MAX_CHARS_PER_PAGE = _env_int("WEB_FETCH_MAX_CHARS_PER_PAGE", 2500)
 # DuckDuckGo rate-limit avoidance: retries and delay (seconds)
 WEB_SEARCH_RETRIES = _env_int("WEB_SEARCH_RETRIES", 3)
@@ -380,41 +384,92 @@ def _merge_web_results(first: list, second: list, prefer_uz: bool = True) -> lis
     return out
 
 
-def _select_for_full_fetch(results: list, top_n: int, max_per_domain: int = 2) -> list:
-    """Choose up to top_n results to fetch in full. Prefer lex.uz > gov.uz > other .uz > rest; limit per domain for diversity."""
-    if top_n <= 0:
+def _tokenize_for_relevance(text: str) -> list:
+    """Lowercase tokenize; keep letters/numbers, min length 2 (supports Latin, Cyrillic, Uzbek)."""
+    if not text:
         return []
-    def domain(url):
-        try:
-            return (urlparse(url).netloc or "").lower()
-        except Exception:
-            return ""
-    def tier(item):
-        url = (item.get("url") or "").lower()
-        if "lex.uz" in url:
-            return 0
-        if "gov.uz" in url:
-            return 1
-        if ".uz" in url or url.endswith(".uz"):
-            return 2
-        return 3
-    candidates = []
+    # Match sequences of letters/digits (Unicode-aware), min 2 chars
+    tokens = re.findall(r"[^\W_]{2,}", (text or "").lower(), re.UNICODE)
+    return tokens
+
+
+def _relevance_score_bm25(query_tokens: list, doc_tokens: list, doc_freq: dict, n_docs: int, k1: float = 1.2) -> float:
+    """BM25-style score: sum over query terms of (tf * idf). idf = log((N - df + 0.5)/(df + 0.5) + 1)."""
+    if not query_tokens or n_docs <= 0:
+        return 0.0
+    tf = Counter(doc_tokens)
+    score = 0.0
+    for term in set(query_tokens):
+        df = doc_freq.get(term, 0)
+        idf = math.log((n_docs - df + 0.5) / (df + 0.5) + 1.0)
+        tf_d = tf.get(term, 0)
+        score += idf * (tf_d * (k1 + 1) / (tf_d + k1))
+    return score
+
+
+def _domain_bonus(url: str) -> float:
+    """Small bonus for trusted domains so relevance dominates but source quality nudges."""
+    u = (url or "").lower()
+    if "lex.uz" in u:
+        return 0.35
+    if "gov.uz" in u:
+        return 0.20
+    if ".uz" in u or u.endswith(".uz"):
+        return 0.10
+    return 0.0
+
+
+def _select_for_full_fetch(question: str, results: list, top_n: int, max_per_domain: int = 2, fetched_full: dict = None) -> list:
+    """Choose up to top_n results by relevance to the question. Uses BM25 on full document text when fetched_full is provided (idx -> full text), else title+snippet only. Domain bonus + diversity."""
+    if top_n <= 0 or not results:
+        return []
+    q_tokens = _tokenize_for_relevance(question)
+    # Build doc texts: when fetched_full is provided, only consider those indices and use full text for BM25
+    doc_token_lists = []
     for idx, item in enumerate(results):
         url = item.get("url") or ""
         if not url.startswith("http"):
             continue
-        candidates.append((tier(item), domain(url), idx, item))
-    candidates.sort(key=lambda x: (x[0], x[1]))
+        if fetched_full is not None and idx not in fetched_full:
+            continue
+        title = item.get("title") or ""
+        snippet = item.get("snippet") or ""
+        full_text = (fetched_full or {}).get(idx) or ""
+        text = f"{title} {snippet} {full_text}".strip()
+        tokens = _tokenize_for_relevance(text)
+        doc_token_lists.append((idx, tokens, url))
+    if not doc_token_lists:
+        return []
+    n_docs = len(doc_token_lists)
+    # Document frequency for each term (over our result set)
+    doc_freq = Counter()
+    for _idx, tokens, _url in doc_token_lists:
+        for t in set(tokens):
+            doc_freq[t] += 1
+    # Score each doc: BM25 relevance + domain bonus
+    scored = []
+    for idx, tokens, url in doc_token_lists:
+        rel = _relevance_score_bm25(q_tokens, tokens, doc_freq, n_docs)
+        bonus = _domain_bonus(url)
+        scored.append((rel + bonus, idx, url))
+    scored.sort(key=lambda x: (-x[0], x[1]))
+    # Select top_n with max_per_domain per domain
+    def domain(u):
+        try:
+            return (urlparse(u).netloc or "").lower()
+        except Exception:
+            return ""
     selected = []
     domain_count = {}
-    for _t, dom, idx, item in candidates:
+    for _score, idx, url in scored:
         if len(selected) >= top_n:
             break
+        dom = domain(url)
         if domain_count.get(dom, 0) >= max_per_domain:
             continue
-        selected.append((idx, item))
+        selected.append(idx)
         domain_count[dom] = domain_count.get(dom, 0) + 1
-    return [idx for idx, _ in selected]
+    return selected
 
 
 def _fetch_page_text(url: str, max_chars: int, timeout: int = 10) -> str:
@@ -551,13 +606,13 @@ def summarize_web_results_with_gemini(question: str, results: list) -> str:
         return None
 
     to_process = results[:WEB_MAX_RESULTS]
-    # Select which results to fetch in full (prefer lex.uz/gov.uz, diversify by domain), then fetch in parallel
+    # Fetch a pool of full documents, then select best WEB_FETCH_TOP_N by BM25 on full text (Python)
     fetched = {}
     if WEB_FETCH_FULL_PAGES and WEB_FETCH_TOP_N > 0:
-        selected_indices = _select_for_full_fetch(to_process, WEB_FETCH_TOP_N)
-        to_fetch = [(idx, to_process[idx]) for idx in selected_indices]
+        pool_size = max(WEB_FETCH_TOP_N, min(WEB_FETCH_POOL_SIZE, len(to_process)))
+        to_fetch = [(idx, to_process[idx]) for idx in range(pool_size) if (to_process[idx].get("url") or "").startswith("http")]
         if to_fetch:
-            print(f"[WEB] Fetching {len(to_fetch)} full page(s) in parallel (timeout 10s each)...")
+            print(f"[WEB] Fetching pool of {len(to_fetch)} full page(s) for relevance selection (timeout 10s each)...")
             def fetch_one(args):
                 idx, item = args
                 url = item.get("url", "")
@@ -568,7 +623,9 @@ def summarize_web_results_with_gemini(question: str, results: list) -> str:
                     if text:
                         fetched[idx] = text
             if fetched:
-                print(f"[WEB] Fetched {len(fetched)} page(s) for deeper context.")
+                print(f"[WEB] Fetched {len(fetched)} page(s); selecting best {WEB_FETCH_TOP_N} by BM25 on full text.")
+                selected_indices = _select_for_full_fetch(question, to_process, WEB_FETCH_TOP_N, fetched_full=fetched)
+                fetched = {i: fetched[i] for i in selected_indices if i in fetched}
 
     context_lines = []
     used_chars = 0
