@@ -120,7 +120,7 @@ def _search_web_ddgs(query: str, max_results: int) -> list:
         if proxy_url:
             print("[WEB] Using Bright Data proxy for DuckDuckGo.")
         client = DDGS(proxy=proxy_url, timeout=30) if proxy_url else DDGS(timeout=30)
-        raw = client.text(query, max_results=max_results)
+        raw = client.text(query, max_results=max_results, backend="duckduckgo")
         results = list(raw) if raw else []
     except ImportError:
         return []
@@ -339,6 +339,39 @@ def search_web_top_results(query: str, max_results: int = 8) -> list:
     except Exception as e:
         print(f"[WEB] Search exception: {e}")
         return []
+
+
+def _merge_web_results(first: list, second: list, prefer_uz: bool = True) -> list:
+    """Merge two result lists, dedupe by URL. Optionally put lex.uz / .uz sources first."""
+    seen = set()
+    out = []
+    def add(item):
+        u = item.get("url", "")
+        if not u or u in seen:
+            return
+        seen.add(u)
+        out.append(item)
+    # Prefer Uzbek/lex.uz domains first if requested
+    def is_uz_source(item):
+        u = (item.get("url") or "").lower()
+        try:
+            host = urlparse(u).netloc
+            return "lex.uz" in u or "gov.uz" in u or host.endswith(".uz")
+        except Exception:
+            return "lex.uz" in u or ".uz" in u
+    if prefer_uz:
+        for item in first + second:
+            if is_uz_source(item):
+                add(item)
+        for item in first + second:
+            if not is_uz_source(item):
+                add(item)
+    else:
+        for item in first + second:
+            add(item)
+    for i, item in enumerate(out, 1):
+        item["id"] = i
+    return out
 
 
 def rewrite_query_with_perplexity(question: str) -> str:
@@ -1111,28 +1144,28 @@ def search_ask_with_provider(question: str, history: list = None) -> tuple[str, 
     # 1. DUCKDUCKGO (priority 1) - Top web results
     print("\n[WEB] Searching top web results (DuckDuckGo)...")
     web_results = search_web_top_results(question, max_results=WEB_MAX_RESULTS)
+
+    # 1b. Always try Perplexity rewrite + second search when available; merge and prefer .uz/lex.uz sources
+    if PERPLEXITY_API_KEY:
+        print(f"[WEB] Rewriting query with Perplexity (max_tokens={PERPLEXITY_REWRITE_MAX_TOKENS})...")
+        rewritten_query = rewrite_query_with_perplexity(question)
+        if rewritten_query:
+            if WEB_SEARCH_RETRY_DELAY > 0:
+                print(f"[WEB] Waiting {WEB_SEARCH_RETRY_DELAY}s before second DuckDuckGo attempt...")
+                time.sleep(WEB_SEARCH_RETRY_DELAY)
+            print(f"[WEB] Second search with rewritten query: {rewritten_query}")
+            second_results = search_web_top_results(rewritten_query, max_results=WEB_MAX_RESULTS)
+            if second_results:
+                web_results = _merge_web_results(web_results or [], second_results, prefer_uz=True)
+                print(f"[WEB] Merged {len(web_results)} results (Uzbek/lex.uz sources preferred).")
+
     if web_results:
         gemini_summary = summarize_web_results_with_gemini(question, web_results)
         if gemini_summary:
             return gemini_summary, "web+gemini"
         return build_web_results_fallback_answer(web_results), "web-search"
 
-    # 1b. Perplexity rewrite -> web search retry
-    print(f"[WEB] No results found. Rewriting query with Perplexity (max_tokens={PERPLEXITY_REWRITE_MAX_TOKENS})...")
-    rewritten_query = rewrite_query_with_perplexity(question)
-    if rewritten_query:
-        if WEB_SEARCH_RETRY_DELAY > 0:
-            print(f"[WEB] Waiting {WEB_SEARCH_RETRY_DELAY}s before second DuckDuckGo attempt...")
-            time.sleep(WEB_SEARCH_RETRY_DELAY)
-        print(f"[WEB] Retrying with rewritten query: {rewritten_query}")
-        web_results = search_web_top_results(rewritten_query, max_results=WEB_MAX_RESULTS)
-        if web_results:
-            gemini_summary = summarize_web_results_with_gemini(question, web_results)
-            if gemini_summary:
-                return gemini_summary, "web+gemini+rewrite"
-            return build_web_results_fallback_answer(web_results), "web-search+rewrite"
-
-    print("[WEB] Still no results, trying Gemini (priority 2)...")
+    print("[WEB] No results, trying Gemini (priority 2)...")
 
     # 2. GEMINI (priority 2) - Google AI with Search Grounding
     if GEMINI_API_KEY:
