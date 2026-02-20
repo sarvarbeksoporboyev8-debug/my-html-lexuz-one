@@ -65,6 +65,10 @@ WEB_EMBEDDING_WEIGHT = max(0.0, min(1.0, float(os.getenv("WEB_EMBEDDING_WEIGHT",
 # Max merged results to consider for the fetch pool (so we run BM25 over many docs, not just first WEB_MAX_RESULTS)
 WEB_FETCH_CANDIDATES_MAX = _env_int("WEB_FETCH_CANDIDATES_MAX", 60)
 WEB_FETCH_MAX_CHARS_PER_PAGE = _env_int("WEB_FETCH_MAX_CHARS_PER_PAGE", 2500)
+# Select by chunks (paragraph/100–150 words) from fetched docs so the exact relevant part wins; if False, select best 5 full docs
+WEB_SELECT_BY_CHUNKS = _env_bool("WEB_SELECT_BY_CHUNKS", True)
+WEB_CHUNK_MAX_WORDS = _env_int("WEB_CHUNK_MAX_WORDS", 150)
+WEB_CHUNK_OVERLAP_WORDS = _env_int("WEB_CHUNK_OVERLAP_WORDS", 20)
 # DuckDuckGo rate-limit avoidance: retries and delay (seconds)
 WEB_SEARCH_RETRIES = _env_int("WEB_SEARCH_RETRIES", 3)
 WEB_SEARCH_RETRY_DELAY = _env_int("WEB_SEARCH_RETRY_DELAY", 2)
@@ -483,6 +487,97 @@ def _embedding_similarities(question: str, doc_texts: list) -> list:
         return []
 
 
+def _chunk_doc_text(text: str, max_words: int = 150, overlap_words: int = 20) -> list:
+    """Split text into paragraphs or max_words segments (same logic as lexuz_chunk_embedding)."""
+    try:
+        from lexuz_chunk_embedding import chunk_by_paragraph_or_words
+        return chunk_by_paragraph_or_words(text, max_words=max_words, overlap_words=overlap_words)
+    except Exception:
+        # Fallback: simple word windows
+        words = (text or "").split()
+        if not words:
+            return []
+        chunks = []
+        start = 0
+        while start < len(words):
+            end = min(start + max_words, len(words))
+            chunks.append(" ".join(words[start:end]))
+            if end >= len(words):
+                break
+            start = max(0, end - overlap_words)
+        return chunks
+
+
+def _select_chunks_for_context(
+    question: str,
+    to_process: list,
+    fetched_full: dict,
+    top_n: int = 5,
+    max_per_doc: int = 2,
+) -> list:
+    """
+    Chunk each fetched doc (paragraph/100–150 words), score chunks by semantic + BM25,
+    return list of (item_dict, chunk_text) for top_n chunks (diversity: max_per_doc per document).
+    """
+    q_tokens = _tokenize_for_relevance(question)
+    # Build (chunk_text, doc_idx, url, title) for all chunks
+    chunk_list = []
+    for idx, item in enumerate(to_process):
+        if idx not in fetched_full or not fetched_full.get(idx):
+            continue
+        url = item.get("url") or ""
+        if not url.startswith("http"):
+            continue
+        title = item.get("title") or ""
+        snippet = item.get("snippet") or ""
+        full_text = fetched_full[idx] or ""
+        text = f"{title} {snippet} {full_text}".strip()
+        for chunk_text in _chunk_doc_text(text, WEB_CHUNK_MAX_WORDS, WEB_CHUNK_OVERLAP_WORDS):
+            if chunk_text.strip():
+                chunk_list.append((chunk_text.strip(), idx, url, title))
+    if not chunk_list:
+        return []
+    # BM25 over chunks
+    doc_freq = Counter()
+    chunk_tokens = []
+    for ct, _idx, _url, _title in chunk_list:
+        toks = _tokenize_for_relevance(ct)
+        chunk_tokens.append(toks)
+        for t in set(toks):
+            doc_freq[t] += 1
+    n_chunks = len(chunk_list)
+    bm25_scores = [_relevance_score_bm25(q_tokens, toks, doc_freq, n_chunks) for toks in chunk_tokens]
+    bm_min, bm_max = min(bm25_scores), max(bm25_scores)
+    bm_range = (bm_max - bm_min) + 1e-9
+    bm25_norm = [(s - bm_min) / bm_range for s in bm25_scores]
+    # Embedding over chunks
+    chunk_texts_only = [c[0] for c in chunk_list]
+    emb_sims = _embedding_similarities(question, chunk_texts_only)
+    if emb_sims and len(emb_sims) == len(chunk_list):
+        emb_norm = [(s + 1.0) / 2.0 for s in emb_sims]
+    else:
+        emb_norm = None
+    alpha = WEB_EMBEDDING_WEIGHT if emb_norm is not None else 0.0
+    scored = []
+    for i, (chunk_text, idx, url, title) in enumerate(chunk_list):
+        bm = bm25_norm[i]
+        em = emb_norm[i] if emb_norm is not None else bm
+        combined = alpha * em + (1.0 - alpha) * bm + _domain_bonus(url)
+        scored.append((combined, chunk_text, idx, url, title))
+    scored.sort(key=lambda x: (-x[0], x[2], x[1]))
+    # Select top_n chunks, max_per_doc per document
+    doc_count = {}
+    selected = []
+    for _sc, chunk_text, idx, url, title in scored:
+        if len(selected) >= top_n:
+            break
+        if doc_count.get(idx, 0) >= max_per_doc:
+            continue
+        selected.append(({"url": url, "title": title, "snippet": chunk_text[:200]}, chunk_text))
+        doc_count[idx] = doc_count.get(idx, 0) + 1
+    return selected
+
+
 def _select_for_full_fetch(question: str, results: list, top_n: int, max_per_domain: int = 2, fetched_full: dict = None) -> list:
     """Choose up to top_n results by relevance: semantic (embedding) + BM25 when available; domain bonus + diversity."""
     if top_n <= 0 or not results:
@@ -726,10 +821,14 @@ def summarize_web_results_with_gemini(question: str, results: list) -> str:
                     if text:
                         fetched[idx] = text
             if fetched:
-                print(f"[WEB] Fetched {len(fetched)} page(s); selecting best {WEB_FETCH_TOP_N} by semantic + BM25 on full text.")
-                selected_indices = _select_for_full_fetch(question, to_process, WEB_FETCH_TOP_N, fetched_full=fetched)
-                fetched = {i: fetched[i] for i in selected_indices if i in fetched}
-                selected_items = [(to_process[i], fetched.get(i, "")) for i in selected_indices]
+                if WEB_SELECT_BY_CHUNKS:
+                    print(f"[WEB] Fetched {len(fetched)} page(s); chunking and selecting best {WEB_FETCH_TOP_N} chunks by semantic + BM25.")
+                    selected_items = _select_chunks_for_context(question, to_process, fetched, top_n=WEB_FETCH_TOP_N)
+                else:
+                    print(f"[WEB] Fetched {len(fetched)} page(s); selecting best {WEB_FETCH_TOP_N} by semantic + BM25 on full text.")
+                    selected_indices = _select_for_full_fetch(question, to_process, WEB_FETCH_TOP_N, fetched_full=fetched)
+                    fetched = {i: fetched[i] for i in selected_indices if i in fetched}
+                    selected_items = [(to_process[i], fetched.get(i, "")) for i in selected_indices]
     else:
         to_process = results[:WEB_MAX_RESULTS]
 
