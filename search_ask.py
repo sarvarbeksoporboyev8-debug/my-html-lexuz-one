@@ -1956,12 +1956,34 @@ def search_ask_with_provider(question: str, history: list = None) -> tuple[str, 
             f"[{i}] {c['title']}\nURL: {c['url']}\nSnippet: {c['chunk_text']}"
             for i, c in enumerate(all_as_chunks, 1)
         ]
+        # Perplexity: fetch only to get page size (word count), rank by that, send just the 10 links (title + URL + snippet) — no full page text
+        perplexity_chunks = []
+        if all_as_chunks and PERPLEXITY_API_KEY:
+            to_fetch = all_as_chunks[:35]
+            def get_page_word_count(c):
+                url = c.get("url") or ""
+                if not url.startswith("http"):
+                    return c, 0
+                text = _fetch_page_text(url, 100000, timeout=8)
+                return c, len(text.split()) if text else 0
+            print(f"\n[WEB] Getting page size (word count) for {len(to_fetch)} docs to pick top 10...")
+            with ThreadPoolExecutor(max_workers=min(8, len(to_fetch))) as ex:
+                with_counts = list(ex.map(get_page_word_count, to_fetch))
+            with_counts.sort(key=lambda x: x[1], reverse=True)
+            top10_chunks = [c for c, _ in with_counts[:10] if c]
+            # Send only links + original snippet, no full page content
+            perplexity_chunks = [
+                {"title": c.get("title", ""), "url": c.get("url", ""), "chunk_text": c.get("chunk_text", "")}
+                for c in top10_chunks
+            ]
+            if perplexity_chunks:
+                print(f"[WEB] Top 10 by page word count selected; sending only links + snippets to Perplexity.")
         # Run both Perplexity and Gemini from same DDG sources in parallel; show both
         results = {}
         def run_perplexity():
-            if all_as_chunks and PERPLEXITY_API_KEY:
-                print(f"\n[PERPLEXITY] Answering from {len(all_as_chunks)} search results only...")
-                return ask_perplexity_from_sources(question, all_as_chunks)
+            if perplexity_chunks and PERPLEXITY_API_KEY:
+                print(f"\n[PERPLEXITY] Answering from {len(perplexity_chunks)} search results (top by content length)...")
+                return ask_perplexity_from_sources(question, perplexity_chunks)
             return None
         def run_gemini():
             if context_lines and GEMINI_API_KEY:
@@ -1969,7 +1991,7 @@ def search_ask_with_provider(question: str, history: list = None) -> tuple[str, 
                 return _call_gemini_with_context(question, context_lines)
             return None
         with ThreadPoolExecutor(max_workers=2) as ex:
-            fut_p = ex.submit(run_perplexity) if (all_as_chunks and PERPLEXITY_API_KEY) else None
+            fut_p = ex.submit(run_perplexity) if (perplexity_chunks and PERPLEXITY_API_KEY) else None
             fut_g = ex.submit(run_gemini) if (context_lines and GEMINI_API_KEY) else None
             if fut_p:
                 results["perplexity"] = fut_p.result()
