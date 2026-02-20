@@ -17,10 +17,11 @@ import requests
 from urllib.parse import urlparse, parse_qs, unquote
 from bs4 import BeautifulSoup
 
-# Perplexity API (primary)
+# Search provider priority: 1=DuckDuckGo (web), 2=Gemini, 3=Perplexity
+# Perplexity API (third priority / fallback)
 PERPLEXITY_API_KEY = os.getenv("PERPLEXITY_API_KEY", "")
 
-# Google Gemini API with Search Grounding (fallback)
+# Google Gemini API with Search Grounding (second priority)
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 
 # Restrict web-search fallback to official legal source
@@ -48,6 +49,10 @@ WEB_MAX_RESULTS = _env_int("WEB_MAX_RESULTS", 4 if LOW_COST_MODE else 10)
 WEB_TITLE_MAX_CHARS = _env_int("WEB_TITLE_MAX_CHARS", 140 if LOW_COST_MODE else 180)
 WEB_SNIPPET_MAX_CHARS = _env_int("WEB_SNIPPET_MAX_CHARS", 220 if LOW_COST_MODE else 400)
 WEB_CONTEXT_MAX_CHARS = _env_int("WEB_CONTEXT_MAX_CHARS", 3500 if LOW_COST_MODE else 9000)
+# DuckDuckGo rate-limit avoidance: retries and delay (seconds)
+WEB_SEARCH_RETRIES = _env_int("WEB_SEARCH_RETRIES", 3)
+WEB_SEARCH_RETRY_DELAY = _env_int("WEB_SEARCH_RETRY_DELAY", 2)
+WEB_SEARCH_INITIAL_DELAY = _env_int("WEB_SEARCH_INITIAL_DELAY", 1)
 GEMINI_WEB_SUMMARY_MAX_OUTPUT_TOKENS = _env_int("GEMINI_WEB_SUMMARY_MAX_OUTPUT_TOKENS", 600 if LOW_COST_MODE else 1200)
 PERPLEXITY_REWRITE_MAX_TOKENS = _env_int("PERPLEXITY_REWRITE_MAX_TOKENS", 80 if LOW_COST_MODE else 100)
 PERPLEXITY_ANSWER_MAX_TOKENS = _env_int("PERPLEXITY_ANSWER_MAX_TOKENS", 1600 if LOW_COST_MODE else 4000)
@@ -97,24 +102,62 @@ def extract_domain_label(url: str) -> str:
         return "web"
 
 
+# Headers that look like a real browser to reduce DuckDuckGo rate limiting / 202
+_DUCKDUCKGO_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Referer": "https://duckduckgo.com/",
+    "Upgrade-Insecure-Requests": "1",
+}
+
+
 def search_web_top_results(query: str, max_results: int = 8) -> list:
-    """Search web results using DuckDuckGo HTML endpoint (no API key required)."""
+    """Search web results using DuckDuckGo HTML endpoint (no API key required).
+    Uses retries with backoff and browser-like headers to avoid rate limits (202/429).
+    """
     try:
         effective_max_results = max(1, min(max_results, WEB_MAX_RESULTS))
         final_query = query.strip()
         if WEB_SEARCH_SITE_FILTER not in final_query:
             final_query = f"{WEB_SEARCH_SITE_FILTER} {final_query}".strip()
 
-        resp = requests.get(
-            "https://duckduckgo.com/html/",
-            params={"q": final_query},
-            headers={
-                "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
-            },
-            timeout=20,
-        )
-        if resp.status_code != 200:
-            print(f"[WEB] Search failed: {resp.status_code}")
+        url = "https://duckduckgo.com/html/"
+        params = {"q": final_query}
+        last_error_status = None
+
+        for attempt in range(WEB_SEARCH_RETRIES):
+            if attempt == 0 and WEB_SEARCH_INITIAL_DELAY > 0:
+                time.sleep(WEB_SEARCH_INITIAL_DELAY)
+            elif attempt > 0:
+                delay = WEB_SEARCH_RETRY_DELAY * (2 ** (attempt - 1))
+                print(f"[WEB] Retry in {delay}s (attempt {attempt + 1}/{WEB_SEARCH_RETRIES})...")
+                time.sleep(delay)
+
+            resp = requests.get(
+                url,
+                params=params,
+                headers=_DUCKDUCKGO_HEADERS,
+                timeout=25,
+            )
+            last_error_status = resp.status_code
+
+            if resp.status_code == 200:
+                break
+            if resp.status_code not in (202, 429, 503):
+                print(f"[WEB] Search failed: {resp.status_code}")
+                return []
+            # 202 Accepted / 429 rate limit / 503 service unavailable -> retry
+            retry_after = resp.headers.get("Retry-After")
+            if retry_after and retry_after.isdigit():
+                delay = int(retry_after)
+                print(f"[WEB] Search {resp.status_code}, Retry-After={delay}s")
+                time.sleep(delay)
+            else:
+                print(f"[WEB] Search failed: {resp.status_code}")
+        else:
+            print(f"[WEB] Search failed after {WEB_SEARCH_RETRIES} attempts: {last_error_status}")
             return []
 
         soup = BeautifulSoup(resp.text, "lxml")
@@ -729,11 +772,11 @@ def ask_gemini_grounded(question: str, history: list = None) -> str:
     
     answer = "\n\n".join(answer_parts)
     
-    # Add sources
-    sources = result.get("sources", [])
+    # Add sources (sources is a dict id -> {id, title, url, ...})
+    sources = result.get("sources", {})
     if sources:
         answer += "\n\nManbalar:\n"
-        for s in sources:
+        for s in sources.values():
             answer += f"[{s['id']}] {s['title']} - {s['url']}\n"
     
     # Add related questions
@@ -919,16 +962,17 @@ Tegishli savollar:
 
 
 def search_ask_with_provider(question: str, history: list = None) -> tuple[str, str]:
-    """Main function with provider metadata: web-search first, then Gemini, then Perplexity."""
-    
+    """Main function with provider metadata.
+    Priority: 1=DuckDuckGo (web), 2=Gemini, 3=Perplexity.
+    """
     print(f"\n{'='*60}")
     print(f"SAVOL: {question}")
     if history:
         print(f"HISTORY: {len(history)} messages")
     print('='*60)
     
-    # 1. WEB SEARCH - Top internet results first (5-10)
-    print("\n[WEB] Searching top web results...")
+    # 1. DUCKDUCKGO (priority 1) - Top web results
+    print("\n[WEB] Searching top web results (DuckDuckGo)...")
     web_results = search_web_top_results(question, max_results=WEB_MAX_RESULTS)
     if web_results:
         gemini_summary = summarize_web_results_with_gemini(question, web_results)
@@ -940,6 +984,9 @@ def search_ask_with_provider(question: str, history: list = None) -> tuple[str, 
     print(f"[WEB] No results found. Rewriting query with Perplexity (max_tokens={PERPLEXITY_REWRITE_MAX_TOKENS})...")
     rewritten_query = rewrite_query_with_perplexity(question)
     if rewritten_query:
+        if WEB_SEARCH_RETRY_DELAY > 0:
+            print(f"[WEB] Waiting {WEB_SEARCH_RETRY_DELAY}s before second DuckDuckGo attempt...")
+            time.sleep(WEB_SEARCH_RETRY_DELAY)
         print(f"[WEB] Retrying with rewritten query: {rewritten_query}")
         web_results = search_web_top_results(rewritten_query, max_results=WEB_MAX_RESULTS)
         if web_results:
@@ -948,9 +995,9 @@ def search_ask_with_provider(question: str, history: list = None) -> tuple[str, 
                 return gemini_summary, "web+gemini+rewrite"
             return build_web_results_fallback_answer(web_results), "web-search+rewrite"
 
-    print("[WEB] Still no results, trying Gemini...")
+    print("[WEB] Still no results, trying Gemini (priority 2)...")
 
-    # 2. GEMINI - Google AI Mode with Search Grounding
+    # 2. GEMINI (priority 2) - Google AI with Search Grounding
     if GEMINI_API_KEY:
         print("\n[GEMINI] Using Google Gemini with Search Grounding...")
         answer = ask_gemini_grounded(question, history=history)
@@ -958,7 +1005,7 @@ def search_ask_with_provider(question: str, history: list = None) -> tuple[str, 
             return answer, "gemini"
         print("[GEMINI] Failed, trying Perplexity...")
     
-    # 3. PERPLEXITY - Final provider fallback
+    # 3. PERPLEXITY (priority 3) - Final fallback
     if PERPLEXITY_API_KEY:
         print("\n[PERPLEXITY] Using Perplexity API...")
         answer = ask_perplexity(question)
@@ -970,7 +1017,7 @@ def search_ask_with_provider(question: str, history: list = None) -> tuple[str, 
 
 
 def search_ask(question: str, history: list = None) -> str:
-    """Main function: web search first, then Gemini, then Perplexity."""
+    """Main function: priority 1=DuckDuckGo, 2=Gemini, 3=Perplexity."""
     answer, _provider = search_ask_with_provider(question, history=history)
     return answer
 
