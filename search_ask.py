@@ -53,9 +53,11 @@ WEB_CONTEXT_MAX_CHARS = _env_int("WEB_CONTEXT_MAX_CHARS", 3500 if LOW_COST_MODE 
 WEB_SEARCH_RETRIES = _env_int("WEB_SEARCH_RETRIES", 3)
 WEB_SEARCH_RETRY_DELAY = _env_int("WEB_SEARCH_RETRY_DELAY", 2)
 WEB_SEARCH_INITIAL_DELAY = _env_int("WEB_SEARCH_INITIAL_DELAY", 1)
-# Debug: save DuckDuckGo HTML when 200 but 0 results (to inspect CAPTCHA vs no-results page)
+# Debug: save and/or print DuckDuckGo HTML when 200 but 0 results (to inspect CAPTCHA vs no-results page)
 WEB_DEBUG_SAVE_HTML = _env_bool("WEB_DEBUG_SAVE_HTML", False)
 WEB_DEBUG_SAVE_HTML_PATH = os.getenv("WEB_DEBUG_SAVE_HTML_PATH", "debug_duckduckgo_last.html")
+WEB_DEBUG_PRINT_HTML = _env_bool("WEB_DEBUG_PRINT_HTML", False)  # print truncated response to terminal (e.g. in railway ssh)
+WEB_DEBUG_PRINT_HTML_MAX = _env_int("WEB_DEBUG_PRINT_HTML_MAX", 4000)
 GEMINI_WEB_SUMMARY_MAX_OUTPUT_TOKENS = _env_int("GEMINI_WEB_SUMMARY_MAX_OUTPUT_TOKENS", 600 if LOW_COST_MODE else 1200)
 PERPLEXITY_REWRITE_MAX_TOKENS = _env_int("PERPLEXITY_REWRITE_MAX_TOKENS", 80 if LOW_COST_MODE else 100)
 PERPLEXITY_ANSWER_MAX_TOKENS = _env_int("PERPLEXITY_ANSWER_MAX_TOKENS", 1600 if LOW_COST_MODE else 4000)
@@ -249,6 +251,24 @@ def search_web_top_results(query: str, max_results: int = 8) -> list:
                     print(f"[WEB] Debug: saved response to {path}")
                 except Exception as e:
                     print(f"[WEB] Debug save failed: {e}")
+            if WEB_DEBUG_PRINT_HTML or WEB_DEBUG_SAVE_HTML:
+                # Print truncated response to terminal (e.g. in railway ssh / PowerShell)
+                text = resp.text
+                hints = []
+                tlower = text.lower()
+                if "captcha" in tlower or "recaptcha" in tlower or "challenge" in tlower:
+                    hints.append("captcha/challenge")
+                if "no results" in tlower or "no result" in tlower:
+                    hints.append("no results")
+                if "verify" in tlower and ("human" in tlower or "browser" in tlower):
+                    hints.append("verify human/browser")
+                print("[WEB] Debug hints:", ", ".join(hints) if hints else "none")
+                snippet = text[:WEB_DEBUG_PRINT_HTML_MAX]
+                if len(text) > WEB_DEBUG_PRINT_HTML_MAX:
+                    snippet += "\n... [truncated, total %d chars]" % len(text)
+                print("--- DuckDuckGo response (first %d chars) ---" % len(snippet))
+                print(snippet)
+                print("--- end ---")
             results = _search_web_fallback_ddgs(final_query, effective_max_results)
 
         return results
