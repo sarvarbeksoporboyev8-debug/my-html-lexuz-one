@@ -1731,8 +1731,8 @@ def ask_perplexity_from_sources(question: str, chunks: list) -> str | None:
     if len(context_block) > max_context_chars:
         context_block = context_block[:max_context_chars] + "\n\n[... matn qisqartirildi ...]"
     system_prompt = """Siz O'zbekiston huquqiy masalalari bo'yicha yordamchi AI siz.
-Faqat foydalanuvchi tomonidan berilgan manbalardan (INTERNET MANBALARI) foydalaning. Qidiruv qilmasdan, faqat shu matnlar asosida javob bering.
-Har bir da'vo yoki norma uchun [1], [2] kabi raqam bilan manbani ko'rsating. Javob oxirida "Manbalar:" va "Tegishli savollar:" bo'limlarini yozing. HECH QACHON ** ishlatmang."""
+Faqat foydalanuvchi tomonidan berilgan INTERNET MANBALARI ro'yxatidagi matnlardan foydalaning. Qidiruv qilmasdan, faqat shu [1], [2], ... manbalar asosida javob bering.
+Har bir da'vo uchun javobda ishlatgan manba raqamini [1], [2], [3] kabi qo'ying. Javob oxirida "Manbalar:" bo'limida faqat javobda ishlatilgan raqamlarni, INTERNET MANBALARI ro'yxatidagi [N] Sarlavha - URL formatida yozing (masalan: [3] 3379-сон ... - https://lex.uz/docs/...). Keyin "Tegishli savollar:" yozing. HECH QACHON ** ishlatmang."""
     user_content = f"""INTERNET MANBALARI (faqat shu manbalardan foydalaning, qidiruv qilmang):
 
 {context_block}
@@ -1763,12 +1763,18 @@ SAVOL: {question}"""
             return None
         data = resp.json()
         answer = data["choices"][0]["message"]["content"]
-        citations = data.get("citations", [])
-        if citations and "Manbalar:" not in answer:
+        # Extract cited numbers [1], [2], [3] from the answer; append Manbalar from OUR chunks so user sees which sources were used
+        import re
+        cited_nums = sorted(set(int(m) for m in re.findall(r"\[(\d+)\]", answer) if 1 <= int(m) <= len(chunks)))
+        if cited_nums:
+            manbalar_lines = [f"[{n}] {chunks[n - 1].get('title', '')} - {chunks[n - 1].get('url', '')}" for n in cited_nums]
+            answer += "\n\nManbalar (javobda ishlatilgan):\n" + "\n".join(manbalar_lines)
+        elif "Manbalar:" not in answer or "(berilgan INTERNET" in answer:
             answer += "\n\nManbalar:\n"
-            for i, url in enumerate(citations, 1):
-                title = extract_title_from_url(url)
-                answer += f"[{i}] {title} - {url}\n"
+            for i, c in enumerate(chunks[:25], 1):
+                answer += f"[{i}] {c.get('title', '')} - {c.get('url', '')}\n"
+            if len(chunks) > 25:
+                answer += f"... va yana {len(chunks) - 25} ta manba.\n"
         if "Tegishli savollar:" not in answer:
             answer += "\n\nTegishli savollar:\n"
             answer += "- Bu mavzu bo'yicha boshqa qonunlar bormi?\n"
