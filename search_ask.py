@@ -24,7 +24,7 @@ PERPLEXITY_API_KEY = os.getenv("PERPLEXITY_API_KEY", "")
 # Google Gemini API with Search Grounding (second priority)
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 
-# Restrict web-search fallback to official legal source
+# Restrict DuckDuckGo to site:lex.uz when enabled (see WEB_SEARCH_SITE_FILTER_ENABLED below)
 WEB_SEARCH_SITE_FILTER = "site:lex.uz"
 
 
@@ -60,6 +60,8 @@ WEB_DEBUG_PRINT_HTML = _env_bool("WEB_DEBUG_PRINT_HTML", False)  # print truncat
 WEB_DEBUG_PRINT_HTML_MAX = _env_int("WEB_DEBUG_PRINT_HTML_MAX", 4000)
 # Bright Data proxy for DuckDuckGo (avoids CAPTCHA); set BRIGHTDATA_ENABLED=1 and host/port/user/pass in Railway
 BRIGHTDATA_ENABLED = _env_bool("BRIGHTDATA_ENABLED", False)
+# When False, DuckDuckGo search is not restricted to site:lex.uz (broader results; Gemini still uses sources)
+WEB_SEARCH_SITE_FILTER_ENABLED = _env_bool("WEB_SEARCH_SITE_FILTER_ENABLED", False)
 GEMINI_WEB_SUMMARY_MAX_OUTPUT_TOKENS = _env_int("GEMINI_WEB_SUMMARY_MAX_OUTPUT_TOKENS", 600 if LOW_COST_MODE else 1200)
 PERPLEXITY_REWRITE_MAX_TOKENS = _env_int("PERPLEXITY_REWRITE_MAX_TOKENS", 80 if LOW_COST_MODE else 100)
 PERPLEXITY_ANSWER_MAX_TOKENS = _env_int("PERPLEXITY_ANSWER_MAX_TOKENS", 1600 if LOW_COST_MODE else 4000)
@@ -180,7 +182,7 @@ def search_web_top_results(query: str, max_results: int = 8) -> list:
     try:
         effective_max_results = max(1, min(max_results, WEB_MAX_RESULTS))
         final_query = query.strip()
-        if WEB_SEARCH_SITE_FILTER not in final_query:
+        if WEB_SEARCH_SITE_FILTER_ENABLED and WEB_SEARCH_SITE_FILTER not in final_query:
             final_query = f"{WEB_SEARCH_SITE_FILTER} {final_query}".strip()
 
         url = "https://duckduckgo.com/html/"
@@ -314,12 +316,11 @@ Qo'shimcha izoh bermang.
 So'rovni 8-16 so'z atrofida qiling.
 Kerak bo'lsa Uzbek + English kalit so'zlarni aralashtiring."""
 
+    site_hint = "\nMUHIM: Query lex.uz bilan cheklansin, ya'ni \"site:lex.uz\" operatori qatnashsin.\n" if WEB_SEARCH_SITE_FILTER_ENABLED else "\n"
     user_prompt = f"""Quyidagi savol uchun Google/DuckDuckGo'da yaxshi natija beradigan aniq qidiruv query yozing:
 
 {question}
-
-MUHIM: Query lex.uz bilan cheklansin, ya'ni "site:lex.uz" operatori qatnashsin.
-
+{site_hint}
 Faqat query qaytaring."""
 
     try:
@@ -347,7 +348,7 @@ Faqat query qaytaring."""
         data = resp.json()
         rewritten = data["choices"][0]["message"]["content"].strip()
         rewritten = rewritten.split("\n")[0].strip().strip('"').strip("'")
-        if rewritten and WEB_SEARCH_SITE_FILTER not in rewritten:
+        if rewritten and WEB_SEARCH_SITE_FILTER_ENABLED and WEB_SEARCH_SITE_FILTER not in rewritten:
             rewritten = f"{WEB_SEARCH_SITE_FILTER} {rewritten}".strip()
         return rewritten if rewritten else None
 
@@ -381,9 +382,10 @@ INTERNET MANBALARI (top natijalar):
 QOIDALAR:
 1. Faqat berilgan manbalarga tayangan holda javob bering
 2. O'zbek tilida yozing, 2-4 paragraf, aniq va qisqa
-3. Har paragraf oxirida [1], [2] kabi iqtibos raqamlarini qo'ying
-4. Taxmin qilmang; manbada bo'lmasa ochiq ayting
-5. Oxirida quyidagi bo'limlarni yozing:
+3. Aniq, ishonchli tonda yozing. "Balki", "ehtimol", "tavsiya etiladi" kabi noaniq ifodalar ishlatmang; manbalarga asoslanib aniq xulosa bering
+4. Har paragraf oxirida [1], [2] kabi iqtibos raqamlarini qo'ying
+5. Taxmin qilmang; manbada bo'lmasa ochiq ayting
+6. Oxirida quyidagi bo'limlarni yozing:
 
 Manbalar:
 [N] Sarlavha - URL
@@ -507,9 +509,11 @@ def ask_gemini_structured(question: str, history: list = None) -> dict:
     # Add current question with instructions for structured output
     full_question = f"""{question}
 
-MUHIM: Javobni paragraflar bilan yoz. Har bir paragrafdan keyin qaysi manbadan olganingni [1], [2] kabi raqam bilan ko'rsat.
-O'zbek tilida javob ber. Qisqa va aniq (2-4 paragraf).
-Oxirida 5 ta tegishli savol yoz."""
+MUHIM:
+- Javobni paragraflar bilan yoz. Har bir paragrafdan keyin qaysi manbadan olganingni [1], [2] kabi raqam bilan ko'rsat.
+- O'zbek tilida javob ber. Qisqa va aniq (2-4 paragraf).
+- Aniq va ishonchli tonda yozing. "Taxminan", "balki", "ehtimol", "tavsiya etiladi", "harakat qilaman" kabi noaniq yoki shubhali ifodalar ishlatmang. Manbalarga asoslanib aniq xulosa bering.
+- Oxirida 5 ta tegishli savol yoz."""
     
     contents.append({
         "role": "user",
