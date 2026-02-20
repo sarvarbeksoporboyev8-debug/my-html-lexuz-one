@@ -111,19 +111,21 @@ def extract_domain_label(url: str) -> str:
         return "web"
 
 
-def _search_web_fallback_ddgs(query: str, max_results: int) -> list:
-    """Optional fallback: use duckduckgo-search package if installed (handles CAPTCHA/HTML better)."""
+def _search_web_ddgs(query: str, max_results: int) -> list:
+    """Primary DuckDuckGo path: use duckduckgo-search package (avoids CAPTCHA/HTML parsing)."""
     try:
         from duckduckgo_search import DDGS
         proxies = _get_brightdata_proxies()
         proxy_url = proxies.get("https") or proxies.get("http") if proxies else None
-        ddgs = DDGS(proxy=proxy_url, timeout=25) if proxy_url else DDGS()
+        if proxy_url:
+            print("[WEB] Using Bright Data proxy for DuckDuckGo.")
+        ddgs = DDGS(proxy=proxy_url, timeout=30) if proxy_url else DDGS(timeout=30)
         raw = ddgs.text(query, max_results=max_results)
         results = list(raw) if raw else []
     except ImportError:
         return []
     except Exception as e:
-        print(f"[WEB] duckduckgo-search fallback failed: {e}")
+        print(f"[WEB] duckduckgo-search failed: {e}")
         return []
     if not results:
         return []
@@ -144,7 +146,7 @@ def _search_web_fallback_ddgs(query: str, max_results: int) -> list:
             "label": extract_domain_label(url),
         })
     if out:
-        print(f"[WEB] duckduckgo-search fallback returned {len(out)} results.")
+        print(f"[WEB] DuckDuckGo (duckduckgo-search): {len(out)} results.")
     return out
 
 
@@ -157,6 +159,74 @@ _DUCKDUCKGO_HEADERS = {
     "Referer": "https://duckduckgo.com/",
     "Upgrade-Insecure-Requests": "1",
 }
+
+
+def _normalize_ddg_url(href: str) -> str:
+    """Extract real URL from DuckDuckGo redirect (uddg=...) or return as-is."""
+    if not href:
+        return ""
+    if "uddg=" in href:
+        try:
+            parsed = parse_qs(urlparse(href).query)
+            return unquote(parsed.get("uddg", [href])[0])
+        except Exception:
+            pass
+    return href
+
+
+def _parse_duckduckgo_html(soup: "BeautifulSoup", effective_max_results: int) -> list:
+    """Parse DuckDuckGo HTML with several selector strategies (DDG changes class names over time)."""
+    results = []
+    seen_urls = set()
+
+    def add_result(link_el, snippet_el=None):
+        nonlocal results, seen_urls
+        url = link_el.get("href", "").strip()
+        url = _normalize_ddg_url(url)
+        if not url or url in seen_urls:
+            return False
+        title = link_el.get_text(" ", strip=True)
+        snippet = ""
+        if snippet_el:
+            snippet = snippet_el.get_text(" ", strip=True)
+        seen_urls.add(url)
+        results.append({
+            "id": len(results) + 1,
+            "title": (title or extract_title_from_url(url))[:WEB_TITLE_MAX_CHARS],
+            "url": url,
+            "snippet": snippet[:WEB_SNIPPET_MAX_CHARS],
+            "label": extract_domain_label(url),
+        })
+        return True
+
+    # Strategy 1: .result + a.result__a (legacy)
+    for block in soup.select(".result"):
+        link_el = block.select_one("a.result__a")
+        if not link_el:
+            link_el = block.select_one("a.result__url")
+        if not link_el:
+            continue
+        snippet_el = block.select_one(".result__snippet")
+        if add_result(link_el, snippet_el) and len(results) >= effective_max_results:
+            return results
+
+    # Strategy 2: any a.result__url or a[class*="result__"] with uddg (DDG HTML variant)
+    if not results:
+        for a in soup.select('a[href*="uddg="]'):
+            if a.get("class") and any("result" in c for c in a.get("class", [])):
+                parent = a.find_parent(class_=re.compile(r"result", re.I))
+                snip = parent.select_one(".result__snippet") if parent else None
+                if add_result(a, snip) and len(results) >= effective_max_results:
+                    return results
+
+    # Strategy 3: links in .results_links or similar container
+    if not results:
+        for block in soup.select(".results_links, .results_links_deep, [class*='result']"):
+            for link in block.select('a[href*="uddg="]'):
+                if add_result(link, None) and len(results) >= effective_max_results:
+                    return results
+
+    return results
 
 
 def _get_brightdata_proxies():
@@ -176,23 +246,29 @@ def _get_brightdata_proxies():
 
 
 def search_web_top_results(query: str, max_results: int = 8) -> list:
-    """Search web results using DuckDuckGo HTML endpoint (no API key required).
-    Uses retries with backoff and browser-like headers to avoid rate limits (202/429).
-    """
+    """Search DuckDuckGo: primary = duckduckgo-search package; fallback = HTML scrape."""
     try:
         effective_max_results = max(1, min(max_results, WEB_MAX_RESULTS))
         final_query = query.strip()
         if WEB_SEARCH_SITE_FILTER_ENABLED and WEB_SEARCH_SITE_FILTER not in final_query:
             final_query = f"{WEB_SEARCH_SITE_FILTER} {final_query}".strip()
 
+        # 1. Primary: duckduckgo-search package (avoids CAPTCHA, no HTML parsing)
+        results = _search_web_ddgs(final_query, effective_max_results)
+        if results:
+            return results
+
+        # 2. Fallback: HTML scrape (retries, Bright Data, multiple selectors)
+        print("[WEB] Falling back to DuckDuckGo HTML scrape.")
+        if WEB_SEARCH_INITIAL_DELAY > 0:
+            time.sleep(WEB_SEARCH_INITIAL_DELAY)
         url = "https://duckduckgo.com/html/"
         params = {"q": final_query}
         last_error_status = None
+        resp = None
 
         for attempt in range(WEB_SEARCH_RETRIES):
-            if attempt == 0 and WEB_SEARCH_INITIAL_DELAY > 0:
-                time.sleep(WEB_SEARCH_INITIAL_DELAY)
-            elif attempt > 0:
+            if attempt > 0:
                 delay = WEB_SEARCH_RETRY_DELAY * (2 ** (attempt - 1))
                 print(f"[WEB] Retry in {delay}s (attempt {attempt + 1}/{WEB_SEARCH_RETRIES})...")
                 time.sleep(delay)
@@ -214,7 +290,6 @@ def search_web_top_results(query: str, max_results: int = 8) -> list:
             if resp.status_code not in (202, 429, 503):
                 print(f"[WEB] Search failed: {resp.status_code}")
                 return []
-            # 202 Accepted / 429 rate limit / 503 service unavailable -> retry
             retry_after = resp.headers.get("Retry-After")
             if retry_after and retry_after.isdigit():
                 delay = int(retry_after)
@@ -227,47 +302,10 @@ def search_web_top_results(query: str, max_results: int = 8) -> list:
             return []
 
         soup = BeautifulSoup(resp.text, "lxml")
-        results = []
-        seen_urls = set()
-
-        for block in soup.select(".result"):
-            link_el = block.select_one("a.result__a")
-            if not link_el:
-                continue
-
-            url = link_el.get("href", "").strip()
-            if not url:
-                continue
-
-            if "uddg=" in url:
-                try:
-                    parsed = parse_qs(urlparse(url).query)
-                    url = unquote(parsed.get("uddg", [url])[0])
-                except Exception:
-                    pass
-
-            title = link_el.get_text(" ", strip=True)
-            snippet_el = block.select_one(".result__snippet")
-            snippet = snippet_el.get_text(" ", strip=True) if snippet_el else ""
-
-            if not url or url in seen_urls:
-                continue
-
-            seen_urls.add(url)
-            results.append({
-                "id": len(results) + 1,
-                "title": title[:WEB_TITLE_MAX_CHARS] if title else extract_title_from_url(url),
-                "url": url,
-                "snippet": snippet[:WEB_SNIPPET_MAX_CHARS],
-                "label": extract_domain_label(url),
-            })
-
-            if len(results) >= effective_max_results:
-                break
+        results = _parse_duckduckgo_html(soup, effective_max_results)
 
         if not results:
-            # 200 OK but no .result elements: often CAPTCHA, "no results" page, or HTML change
-            print("[WEB] DuckDuckGo returned 200 but no results (possible CAPTCHA or empty for this query).")
+            print("[WEB] DuckDuckGo HTML returned no results (CAPTCHA or empty page).")
             if WEB_DEBUG_SAVE_HTML:
                 try:
                     path = os.path.abspath(WEB_DEBUG_SAVE_HTML_PATH)
@@ -279,7 +317,6 @@ def search_web_top_results(query: str, max_results: int = 8) -> list:
                 except Exception as e:
                     print(f"[WEB] Debug save failed: {e}")
             if WEB_DEBUG_PRINT_HTML or WEB_DEBUG_SAVE_HTML:
-                # Print truncated response to terminal (e.g. in railway ssh / PowerShell)
                 text = resp.text
                 hints = []
                 tlower = text.lower()
@@ -296,7 +333,6 @@ def search_web_top_results(query: str, max_results: int = 8) -> list:
                 print("--- DuckDuckGo response (first %d chars) ---" % len(snippet))
                 print(snippet)
                 print("--- end ---")
-            results = _search_web_fallback_ddgs(final_query, effective_max_results)
 
         return results
 
