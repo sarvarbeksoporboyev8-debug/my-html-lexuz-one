@@ -51,12 +51,13 @@ LOW_COST_MODE = _env_bool("LOW_COST_MODE", True)
 WEB_MAX_RESULTS = _env_int("WEB_MAX_RESULTS", 4 if LOW_COST_MODE else 10)
 WEB_TITLE_MAX_CHARS = _env_int("WEB_TITLE_MAX_CHARS", 140 if LOW_COST_MODE else 180)
 WEB_SNIPPET_MAX_CHARS = _env_int("WEB_SNIPPET_MAX_CHARS", 220 if LOW_COST_MODE else 400)
-# Context sent to Gemini: ~3.5k (low-cost) or ~32k so 20 results + 5 full-page excerpts can fit
-WEB_CONTEXT_MAX_CHARS = _env_int("WEB_CONTEXT_MAX_CHARS", 3500 if LOW_COST_MODE else 32000)
-# Optional: fetch full page content for top N results so Gemini reads actual articles (deeper answers)
+# Context sent to Perplexity/Gemini: ~3.5k (low-cost) or ~60k so many lex.uz chunks (e.g. 25–30) fit
+WEB_CONTEXT_MAX_CHARS = _env_int("WEB_CONTEXT_MAX_CHARS", 3500 if LOW_COST_MODE else 60000)
+# Optional: fetch full page content for top N results so model reads actual articles (deeper answers)
 WEB_FETCH_FULL_PAGES = _env_bool("WEB_FETCH_FULL_PAGES", False)
-WEB_FETCH_TOP_N = _env_int("WEB_FETCH_TOP_N", 5)
-# How many documents to fetch in full for selection; we then pick best WEB_FETCH_TOP_N (Python). Default = all candidates.
+# Number of chunks/sources sent to Perplexity and Gemini (more lex.uz links = better chance to hit the right norm)
+WEB_FETCH_TOP_N = _env_int("WEB_FETCH_TOP_N", 30)
+# How many documents to fetch in full for selection; we then pick best WEB_FETCH_TOP_N chunks.
 WEB_FETCH_POOL_SIZE = _env_int("WEB_FETCH_POOL_SIZE", 60)
 # Use embedding similarity (semantic) in addition to BM25 for document selection; set 0 to use BM25 only
 WEB_USE_EMBEDDINGS = _env_bool("WEB_USE_EMBEDDINGS", True)
@@ -67,18 +68,18 @@ WEB_FETCH_CANDIDATES_MAX = _env_int("WEB_FETCH_CANDIDATES_MAX", 60)
 WEB_FETCH_MAX_CHARS_PER_PAGE = _env_int("WEB_FETCH_MAX_CHARS_PER_PAGE", 2500)
 # Select by chunks (paragraph/100–150 words) from fetched docs so the exact relevant part wins; if False, select best 5 full docs
 WEB_SELECT_BY_CHUNKS = _env_bool("WEB_SELECT_BY_CHUNKS", True)
-# Two-stage: first pick this many docs by title+snippet+url only, then fetch and score modda/chunks (avoids wrong-theme docs flooding pool)
-WEB_FETCH_TOP_DOCS = _env_int("WEB_FETCH_TOP_DOCS", 10)
+# Two-stage: first pick this many docs by title+snippet+url only, then fetch and score modda/chunks (need enough docs to get WEB_FETCH_TOP_N chunks)
+WEB_FETCH_TOP_DOCS = _env_int("WEB_FETCH_TOP_DOCS", 30)
 WEB_CHUNK_MAX_WORDS = _env_int("WEB_CHUNK_MAX_WORDS", 150)
 WEB_CHUNK_OVERLAP_WORDS = _env_int("WEB_CHUNK_OVERLAP_WORDS", 20)
 # MMR (Maximal Marginal Relevance): pick chunks that are relevant and non-redundant (λ=relevance, 1-λ=diversity)
 WEB_USE_MMR = _env_bool("WEB_USE_MMR", True)
 WEB_MMR_LAMBDA = max(0.0, min(1.0, float(os.getenv("WEB_MMR_LAMBDA", "0.7"))))
-WEB_MMR_CANDIDATES = _env_int("WEB_MMR_CANDIDATES", 15)
-# Cross-encoder reranker: take top N by score, rerank (query, chunk), send top 5 to Gemini
+WEB_MMR_CANDIDATES = _env_int("WEB_MMR_CANDIDATES", 40)
+# Cross-encoder reranker: take top N by score, rerank (query, chunk), then take top WEB_FETCH_TOP_N
 WEB_USE_RERANKER = _env_bool("WEB_USE_RERANKER", True)
 WEB_RERANKER_MODEL = os.getenv("WEB_RERANKER_MODEL", "BAAI/bge-reranker-v2-m3")
-WEB_RERANKER_CANDIDATES = _env_int("WEB_RERANKER_CANDIDATES", 8)
+WEB_RERANKER_CANDIDATES = _env_int("WEB_RERANKER_CANDIDATES", 35)
 # DuckDuckGo rate-limit avoidance: retries and delay (seconds)
 WEB_SEARCH_RETRIES = _env_int("WEB_SEARCH_RETRIES", 3)
 WEB_SEARCH_RETRY_DELAY = _env_int("WEB_SEARCH_RETRY_DELAY", 2)
@@ -1001,19 +1002,18 @@ def _get_lex_chunk_context(question: str, top_k: int = 5) -> list:
         return []
 
 
-def summarize_web_results_with_gemini(question: str, results: list) -> tuple:
-    """Summarize fetched web results with Gemini, citing [1], [2], ... markers.
-    Returns (summary_text, chosen_chunks) where chosen_chunks is a list of {"title", "url", "chunk_text"}
-    for the selected items sent to Gemini, or None if none.
+def run_web_retrieval(question: str, results: list) -> tuple:
     """
-    if not GEMINI_API_KEY or not results:
-        return None, None
-
+    Run our retrieval pipeline (fetch, modda/chunk, select top 5). Returns (chosen_chunks, context_lines).
+    chosen_chunks = list of {"title", "url", "chunk_text"}. context_lines = list of strings for prompt.
+    Use these to feed Perplexity (our sources only) or Gemini.
+    """
+    if not results:
+        return None, []
     fetched = {}
-    selected_items = None  # when set, only these go to context (with ids 1..n)
+    selected_items = None
 
     if WEB_FETCH_FULL_PAGES and WEB_FETCH_TOP_N > 0:
-        # Use full merged list (up to WEB_FETCH_CANDIDATES_MAX) for pool, not just first WEB_MAX_RESULTS
         candidates_limit = min(len(results), WEB_FETCH_CANDIDATES_MAX)
         to_process = results[:candidates_limit]
         # 0 = fetch all candidates; else cap at WEB_FETCH_POOL_SIZE
@@ -1084,14 +1084,20 @@ def summarize_web_results_with_gemini(question: str, results: list) -> tuple:
             if used_chars >= WEB_CONTEXT_MAX_CHARS:
                 break
 
-    # Build chosen_chunks for CLI output (the 5 selected items sent to Gemini)
+    # Build chosen_chunks for CLI output (the 5 selected items sent to model)
     chosen_chunks = None
     if selected_items:
         chosen_chunks = [
             {"title": item.get("title", ""), "url": item.get("url", ""), "chunk_text": full_text}
             for (item, full_text) in selected_items
         ]
+    return chosen_chunks, context_lines
 
+
+def _call_gemini_with_context(question: str, context_lines: list) -> str | None:
+    """Build prompt from context_lines and call Gemini; return summary text or None."""
+    if not GEMINI_API_KEY or not context_lines:
+        return None
     prompt = f"""Siz O'zbekiston huquqiy masalalari bo'yicha yordamchi AI siz.
 
 SAVOL:
@@ -1114,13 +1120,11 @@ Manbalar:
 Tegishli savollar:
 - 5 ta tegishli savol
 """
-
     models = [
         "gemini-2.0-flash",
         "gemini-2.0-flash-lite",
         "gemini-1.5-flash",
     ]
-
     for model in models:
         try:
             resp = requests.post(
@@ -1136,23 +1140,31 @@ Tegishli savollar:
                 },
                 timeout=90,
             )
-
             if resp.status_code == 429:
                 print(f"[WEB+GEMINI] {model} rate limited, trying next model...")
                 continue
-
             if resp.status_code != 200:
                 print(f"[WEB+GEMINI] {model} failed: {resp.status_code}")
                 continue
-
             data = resp.json()
-            return data["candidates"][0]["content"]["parts"][0]["text"].strip(), chosen_chunks
-
+            return data["candidates"][0]["content"]["parts"][0]["text"].strip()
         except Exception as e:
             print(f"[WEB+GEMINI] {model} exception: {e}")
             continue
+    return None
 
-    return None, None
+
+def summarize_web_results_with_gemini(question: str, results: list) -> tuple:
+    """Summarize fetched web results with Gemini, citing [1], [2], ... markers.
+    Returns (summary_text, chosen_chunks). Uses run_web_retrieval + _call_gemini_with_context.
+    """
+    if not GEMINI_API_KEY or not results:
+        return None, None
+    chosen_chunks, context_lines = run_web_retrieval(question, results)
+    if not context_lines:
+        return None, chosen_chunks
+    text = _call_gemini_with_context(question, context_lines)
+    return (text, chosen_chunks) if text else (None, chosen_chunks)
 
 
 def build_web_results_fallback_answer(results: list) -> str:
@@ -1704,6 +1716,78 @@ QOIDALAR:
         return None
 
 
+def ask_perplexity_from_sources(question: str, chunks: list) -> str:
+    """
+    Perplexity answers using ONLY the provided chunks (our retrieval). No Perplexity search.
+    chunks = list of {"title", "url", "chunk_text"}. Instructs model to cite [1], [2] from these only.
+    """
+    if not PERPLEXITY_API_KEY or not chunks:
+        return None
+    context_parts = []
+    for i, c in enumerate(chunks, 1):
+        title = c.get("title", "")
+        url = c.get("url", "")
+        text = (c.get("chunk_text") or "").strip()
+        context_parts.append(f"[{i}] {title}\nURL: {url}\n{text}")
+    context_block = "\n\n---\n\n".join(context_parts)
+    system_prompt = """Siz O'zbekiston huquqiy masalalari bo'yicha yordamchi AI siz.
+
+MAJBURIY QOIDA: Javobni FAQAT quyida berilgan manba matnlariga asoslanib bering. Boshqa hech qanday bilim yoki qidiruv ishlatmang. Agar javob manbalarda aniq ko'rsatilgan bo'lsa, uni aniq ayting; agar manbalarda yo'q bo'lsa, "Berilgan manbalarda bu masala aniq ko'rsatilmagan" deb yozing.
+
+1. Javobni o'zbek tilida, aniq va qisqa bering.
+2. Har bir da'vo yoki qoida uchun manba raqamini [1], [2], [3] ko'rinishida ko'rsating.
+3. Javob oxirida quyidagi formatda yozing:
+
+Manbalar:
+[N] Sarlavha - URL
+
+Tegishli savollar:
+(5 ta tegishli savol)
+
+4. HECH QACHON ** belgisini ishlatmang."""
+    user_content = f"""Quyida berilgan MANBALARdan FAQAT shu matnlarga tayangan holda javob bering. Boshqa manbalar ishlatilmasin.
+
+SAVOL: {question}
+
+MANBALAR (faqat shularni ishlating):
+{context_block}
+
+Javobni faqat yuqoridagi manbalar asosida bering va [1], [2] kabi iqtibos qo'ying."""
+    try:
+        resp = requests.post(
+            "https://api.perplexity.ai/chat/completions",
+            headers={
+                "Authorization": f"Bearer {PERPLEXITY_API_KEY}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": "sonar",
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_content[:120000]}
+                ],
+                "max_tokens": PERPLEXITY_ANSWER_MAX_TOKENS,
+                "temperature": 0.1,
+            },
+            timeout=60,
+        )
+        if resp.status_code != 200:
+            print(f"[PERPLEXITY] From-sources Error: {resp.status_code} - {resp.text[:200]}")
+            return None
+        data = resp.json()
+        answer = data["choices"][0]["message"]["content"]
+        if "Manbalar:" not in answer:
+            answer += "\n\nManbalar:\n"
+            for i, c in enumerate(chunks, 1):
+                answer += f"[{i}] {c.get('title', '')} - {c.get('url', '')}\n"
+        if "Tegishli savollar:" not in answer:
+            answer += "\n\nTegishli savollar:\n- Berilgan manbalar bo'yicha boshqa qanday muhim qoidalar bor?\n- Bu qoida qachon qo'llaniladi?\n- Istisnolar bormi?\n- Qaysi organ nazorat qiladi?\n- Amaliyotda qanday qo'llaniladi?\n"
+        return answer
+    except Exception as e:
+        print(f"[PERPLEXITY] From-sources failed: {e}")
+        return None
+
+
 def ask_perplexity(question: str) -> str:
     """Use Perplexity API - searches and answers in one call (legacy string response)."""
     
@@ -1781,7 +1865,7 @@ Tegishli savollar:
 
 def search_ask_with_provider(question: str, history: list = None) -> tuple[str, str, list]:
     """Main function with provider metadata.
-    Priority: 1=Perplexity API, 2=DuckDuckGo (web)+Gemini, 3=Gemini Search Grounding.
+    Priority: 1=Our retrieval + Perplexity (sources only), 2=Our retrieval + Gemini, 3=Gemini Search Grounding, 4=Perplexity own search.
     Returns (answer, provider, chosen_chunks). chosen_chunks is list of {title, url, chunk_text} or None.
     """
     print(f"\n{'='*60}")
@@ -1790,15 +1874,7 @@ def search_ask_with_provider(question: str, history: list = None) -> tuple[str, 
         print(f"HISTORY: {len(history)} messages")
     print('='*60)
 
-    # 1. PERPLEXITY (priority 1) - Try first to assess quality
-    if PERPLEXITY_API_KEY:
-        print("\n[PERPLEXITY] Using Perplexity API (priority 1)...")
-        answer = ask_perplexity(question)
-        if answer:
-            return answer, "perplexity", None
-        print("[PERPLEXITY] Failed, trying Web+Gemini...")
-
-    # 2. DUCKDUCKGO + GEMINI (priority 2) - Top web results + summarize
+    # 1. WEB SEARCH FIRST (DDG + optional Perplexity query rewrite + lex filter)
     print("\n[WEB] Searching top web results (DuckDuckGo)...")
     web_results = search_web_top_results(question, max_results=WEB_MAX_RESULTS)
 
@@ -1826,12 +1902,23 @@ def search_ask_with_provider(question: str, history: list = None) -> tuple[str, 
             print(f"[WEB] Lex.uz only: {len(web_results)} results (filtered from {before}).")
 
     if web_results:
-        gemini_summary, chosen_chunks = summarize_web_results_with_gemini(question, web_results)
-        if gemini_summary:
-            return gemini_summary, "web+gemini", chosen_chunks
+        # Run our retrieval once: fetch, modda/chunk, select top 5
+        chosen_chunks, context_lines = run_web_retrieval(question, web_results)
+        # Priority 1: Perplexity answering ONLY from our chosen chunks (no Perplexity search)
+        if chosen_chunks and PERPLEXITY_API_KEY:
+            print("\n[PERPLEXITY] Answering from our sources only (no Perplexity search)...")
+            answer = ask_perplexity_from_sources(question, chosen_chunks)
+            if answer:
+                return answer, "perplexity+our_sources", chosen_chunks
+        # Priority 2: Gemini with same context
+        if context_lines and GEMINI_API_KEY:
+            print("\n[WEB+GEMINI] Summarizing with Gemini from our context...")
+            answer = _call_gemini_with_context(question, context_lines)
+            if answer:
+                return answer, "web+gemini", chosen_chunks
         return build_web_results_fallback_answer(web_results), "web-search", None
 
-    print("[WEB] No results, trying Gemini (priority 3)...")
+    print("[WEB] No results, trying Gemini Search Grounding then Perplexity...")
 
     # 3. GEMINI (priority 3) - Google AI with Search Grounding
     if GEMINI_API_KEY:
@@ -1840,6 +1927,13 @@ def search_ask_with_provider(question: str, history: list = None) -> tuple[str, 
         if answer:
             return answer, "gemini", None
         print("[GEMINI] Failed")
+
+    # 4. PERPLEXITY (priority 4) - Own search when no web results
+    if PERPLEXITY_API_KEY:
+        print("\n[PERPLEXITY] Using Perplexity API (own search)...")
+        answer = ask_perplexity(question)
+        if answer:
+            return answer, "perplexity", None
 
     return "Javob topilmadi. Perplexity/Web/Gemini manbalaridan javob olib bo'lmadi.", "none", None
 
