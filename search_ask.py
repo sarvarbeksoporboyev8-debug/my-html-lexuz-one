@@ -79,6 +79,9 @@ BRIGHTDATA_ENABLED = _env_bool("BRIGHTDATA_ENABLED", False)
 # Restrict all web search to lex.uz: DDG uses site:lex.uz and we keep only lex.uz results
 WEB_SEARCH_SITE_FILTER_ENABLED = _env_bool("WEB_SEARCH_SITE_FILTER_ENABLED", True)
 WEB_LEX_ONLY = _env_bool("WEB_LEX_ONLY", True)
+# Optional: path to lex.uz chunk embedding index (paragraph/100–150 word chunks); if set, top chunks are prepended to context
+LEX_CHUNK_INDEX_PATH = os.getenv("LEX_CHUNK_INDEX_PATH", "")
+LEX_CHUNK_TOP_K = _env_int("LEX_CHUNK_TOP_K", 5)
 GEMINI_WEB_SUMMARY_MAX_OUTPUT_TOKENS = _env_int("GEMINI_WEB_SUMMARY_MAX_OUTPUT_TOKENS", 600 if LOW_COST_MODE else 1200)
 PERPLEXITY_REWRITE_MAX_TOKENS = _env_int("PERPLEXITY_REWRITE_MAX_TOKENS", 80 if LOW_COST_MODE else 100)
 PERPLEXITY_ANSWER_MAX_TOKENS = _env_int("PERPLEXITY_ANSWER_MAX_TOKENS", 1600 if LOW_COST_MODE else 4000)
@@ -677,9 +680,26 @@ Output 4–5 search queries (one per line) that would cross-reference the right 
         return []
 
 
+def _get_lex_chunk_context(question: str, top_k: int = 5) -> list:
+    """If LEX_CHUNK_INDEX_PATH is set and exists, return context lines from chunk embedding search (paragraph/100–150 word index)."""
+    if not LEX_CHUNK_INDEX_PATH or not os.path.isfile(LEX_CHUNK_INDEX_PATH) or top_k <= 0:
+        return []
+    try:
+        from lexuz_chunk_embedding import search_chunks
+        hits = search_chunks(question, LEX_CHUNK_INDEX_PATH, top_k=top_k)
+        if not hits:
+            return []
+        print(f"[WEB] Lex chunk index: using top {len(hits)} paragraph/chunk(s).")
+        return [f"[LEX] {h['title']}\nURL: {h['url']}\n{h['chunk_text']}" for h in hits]
+    except Exception as e:
+        print(f"[WEB] Lex chunk index failed: {e}")
+        return []
+
+
 def summarize_web_results_with_gemini(question: str, results: list) -> str:
     """Summarize fetched web results with Gemini, citing [1], [2], ... markers.
     If WEB_FETCH_FULL_PAGES is True, fetches full page content for a pool from all merged results, then selects best N by BM25 on full text.
+    Optional: LEX_CHUNK_INDEX_PATH adds paragraph-level lex.uz chunks at the start of context.
     """
     if not GEMINI_API_KEY or not results:
         return None
@@ -715,6 +735,14 @@ def summarize_web_results_with_gemini(question: str, results: list) -> str:
 
     context_lines = []
     used_chars = 0
+    # Optional: prepend paragraph-level lex.uz chunks from embedding index (exact modda/paragraph match)
+    for line in _get_lex_chunk_context(question, LEX_CHUNK_TOP_K):
+        if used_chars + len(line) > WEB_CONTEXT_MAX_CHARS:
+            line = line[: max(0, WEB_CONTEXT_MAX_CHARS - used_chars - 50)] + "\n..."
+        context_lines.append(line)
+        used_chars += len(line)
+        if used_chars >= WEB_CONTEXT_MAX_CHARS:
+            break
     if selected_items is not None:
         # Context = only the 5 selected documents (each with full text), ids [1]..[5]
         for num, (item, full_text) in enumerate(selected_items, 1):
