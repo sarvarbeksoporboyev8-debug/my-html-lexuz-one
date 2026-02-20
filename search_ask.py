@@ -2044,11 +2044,13 @@ def main():
         sys.exit(1)
     
     question = " ".join(sys.argv[1:])
+    t0 = time.perf_counter()
     answer, chosen_chunks = search_ask(question)
-    
+    elapsed = time.perf_counter() - t0
     print("\n" + "="*60)
     print("JAVOB:")
     print("="*60)
+    print(f"[Vaqt: {elapsed:.1f} soniya]")
     print(answer)
     if chosen_chunks:
         print("\n" + "="*60)
@@ -2064,6 +2066,7 @@ def main():
             print(f"    {url}")
             print(f"    {text}")
     print("\n⚠️  Bu huquqiy maslahat emas.")
+    print(f"\n[Vaqt: {elapsed:.1f} soniya]")
 
 
 if __name__ == "__main__":
