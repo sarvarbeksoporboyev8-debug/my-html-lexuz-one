@@ -1732,7 +1732,8 @@ def ask_perplexity_from_sources(question: str, chunks: list) -> str | None:
         context_block = context_block[:max_context_chars] + "\n\n[... matn qisqartirildi ...]"
     system_prompt = """Siz O'zbekiston huquqiy masalalari bo'yicha yordamchi AI siz.
 Faqat foydalanuvchi tomonidan berilgan INTERNET MANBALARI ro'yxatidagi matnlardan foydalaning. Qidiruv qilmasdan, faqat shu [1], [2], ... manbalar asosida javob bering.
-Har bir da'vo uchun javobda ishlatgan manba raqamini [1], [2], [3] kabi qo'ying. Javob oxirida "Manbalar:" bo'limida faqat javobda ishlatilgan raqamlarni, INTERNET MANBALARI ro'yxatidagi [N] Sarlavha - URL formatida yozing (masalan: [3] 3379-сон ... - https://lex.uz/docs/...). Keyin "Tegishli savollar:" yozing. HECH QACHON ** ishlatmang."""
+MUHIM: Berilgan BARCHA manbalarni muhokama qiling. Savolga to'g'ridan-to'g'ri tegishli bo'lganlarini (masalan "Reklama to'g'risida", "Ta'lim to'g'risida", maktab, kripto, taqiq) albatta javobda [N] bilan iqtibos keltiring. Kamida 5–10 ta turli manbadan iqtibos keltiring.
+Har bir da'vo uchun javobda ishlatgan manba raqamini [1], [2], [3] kabi qo'ying. Javob oxirida "Manbalar:" va "Tegishli savollar:" yozing. HECH QACHON ** ishlatmang."""
     user_content = f"""INTERNET MANBALARI (faqat shu manbalardan foydalaning, qidiruv qilmang):
 
 {context_block}
@@ -1912,19 +1913,36 @@ def search_ask_with_provider(question: str, history: list = None) -> tuple[str, 
             f"[{i}] {c['title']}\nURL: {c['url']}\nSnippet: {c['chunk_text']}"
             for i, c in enumerate(all_as_chunks, 1)
         ]
-        # Priority 1: Perplexity from these sources only
-        if all_as_chunks and PERPLEXITY_API_KEY:
-            print(f"\n[PERPLEXITY] Answering from {len(all_as_chunks)} search results only (no Perplexity search)...")
-            answer = ask_perplexity_from_sources(question, all_as_chunks)
-            if answer:
-                return answer, "perplexity+our_sources", all_as_chunks
-        # Priority 2: Gemini from same sources only (no fetch/embedding/rerank)
-        if context_lines and GEMINI_API_KEY:
-            print(f"\n[WEB+GEMINI] Summarizing with Gemini from {len(context_lines)} search results only...")
-            answer = _call_gemini_with_context(question, context_lines)
-            if answer:
-                return answer, "web+gemini", all_as_chunks
-        return build_web_results_fallback_answer(web_results), "web-search", None
+        # Run both Perplexity and Gemini from same DDG sources in parallel; show both
+        results = {}
+        def run_perplexity():
+            if all_as_chunks and PERPLEXITY_API_KEY:
+                print(f"\n[PERPLEXITY] Answering from {len(all_as_chunks)} search results only...")
+                return ask_perplexity_from_sources(question, all_as_chunks)
+            return None
+        def run_gemini():
+            if context_lines and GEMINI_API_KEY:
+                print(f"\n[GEMINI] Answering from {len(context_lines)} search results only...")
+                return _call_gemini_with_context(question, context_lines)
+            return None
+        with ThreadPoolExecutor(max_workers=2) as ex:
+            fut_p = ex.submit(run_perplexity) if (all_as_chunks and PERPLEXITY_API_KEY) else None
+            fut_g = ex.submit(run_gemini) if (context_lines and GEMINI_API_KEY) else None
+            if fut_p:
+                results["perplexity"] = fut_p.result()
+            if fut_g:
+                results["gemini"] = fut_g.result()
+        parts = []
+        if results.get("perplexity"):
+            parts.append("=== PERPLEXITY (DDG manbalarimizdan) ===\n\n" + results["perplexity"])
+        else:
+            parts.append("=== PERPLEXITY (DDG manbalarimizdan) ===\n\n(Javob olinmadi.)")
+        if results.get("gemini"):
+            parts.append("=== GEMINI (DDG manbalarimizdan) ===\n\n" + results["gemini"])
+        else:
+            parts.append("=== GEMINI (DDG manbalarimizdan) ===\n\n(Javob olinmadi.)")
+        combined = ("\n\n" + "=" * 50 + "\n\n").join(parts)
+        return combined, "perplexity+gemini", all_as_chunks
 
     print("[WEB] No results, trying Gemini Search Grounding then Perplexity...")
 
