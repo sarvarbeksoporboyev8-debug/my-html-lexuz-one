@@ -14,7 +14,7 @@ import json
 import re
 import time
 import requests
-from urllib.parse import urlparse, parse_qs, unquote
+from urllib.parse import urlparse, parse_qs, unquote, quote
 from bs4 import BeautifulSoup
 
 # Search provider priority: 1=DuckDuckGo (web), 2=Gemini, 3=Perplexity
@@ -58,6 +58,8 @@ WEB_DEBUG_SAVE_HTML = _env_bool("WEB_DEBUG_SAVE_HTML", False)
 WEB_DEBUG_SAVE_HTML_PATH = os.getenv("WEB_DEBUG_SAVE_HTML_PATH", "debug_duckduckgo_last.html")
 WEB_DEBUG_PRINT_HTML = _env_bool("WEB_DEBUG_PRINT_HTML", False)  # print truncated response to terminal (e.g. in railway ssh)
 WEB_DEBUG_PRINT_HTML_MAX = _env_int("WEB_DEBUG_PRINT_HTML_MAX", 4000)
+# Bright Data proxy for DuckDuckGo (avoids CAPTCHA); set BRIGHTDATA_ENABLED=1 and host/port/user/pass in Railway
+BRIGHTDATA_ENABLED = _env_bool("BRIGHTDATA_ENABLED", False)
 GEMINI_WEB_SUMMARY_MAX_OUTPUT_TOKENS = _env_int("GEMINI_WEB_SUMMARY_MAX_OUTPUT_TOKENS", 600 if LOW_COST_MODE else 1200)
 PERPLEXITY_REWRITE_MAX_TOKENS = _env_int("PERPLEXITY_REWRITE_MAX_TOKENS", 80 if LOW_COST_MODE else 100)
 PERPLEXITY_ANSWER_MAX_TOKENS = _env_int("PERPLEXITY_ANSWER_MAX_TOKENS", 1600 if LOW_COST_MODE else 4000)
@@ -111,7 +113,10 @@ def _search_web_fallback_ddgs(query: str, max_results: int) -> list:
     """Optional fallback: use duckduckgo-search package if installed (handles CAPTCHA/HTML better)."""
     try:
         from duckduckgo_search import DDGS
-        raw = DDGS().text(query, max_results=max_results)
+        proxies = _get_brightdata_proxies()
+        proxy_url = proxies.get("https") or proxies.get("http") if proxies else None
+        ddgs = DDGS(proxy=proxy_url, timeout=25) if proxy_url else DDGS()
+        raw = ddgs.text(query, max_results=max_results)
         results = list(raw) if raw else []
     except ImportError:
         return []
@@ -152,6 +157,22 @@ _DUCKDUCKGO_HEADERS = {
 }
 
 
+def _get_brightdata_proxies():
+    """Build Bright Data proxy dict from env (BRIGHTDATA_ENABLED, HOST, PORT, USERNAME, PASSWORD)."""
+    if not BRIGHTDATA_ENABLED:
+        return None
+    host = os.getenv("BRIGHTDATA_HOST", "").strip()
+    port = os.getenv("BRIGHTDATA_PORT", "33335").strip()
+    user = os.getenv("BRIGHTDATA_USERNAME", "").strip()
+    password = os.getenv("BRIGHTDATA_PASSWORD", "").strip()
+    if not host or not user or not password:
+        return None
+    # http://user:pass@host:port (quote user/pass in case of special chars)
+    auth = f"{quote(user, safe='')}:{quote(password, safe='')}"
+    proxy_url = f"http://{auth}@{host}:{port}"
+    return {"http": proxy_url, "https": proxy_url}
+
+
 def search_web_top_results(query: str, max_results: int = 8) -> list:
     """Search web results using DuckDuckGo HTML endpoint (no API key required).
     Uses retries with backoff and browser-like headers to avoid rate limits (202/429).
@@ -174,11 +195,15 @@ def search_web_top_results(query: str, max_results: int = 8) -> list:
                 print(f"[WEB] Retry in {delay}s (attempt {attempt + 1}/{WEB_SEARCH_RETRIES})...")
                 time.sleep(delay)
 
+            proxies = _get_brightdata_proxies()
+            if attempt == 0 and proxies:
+                print("[WEB] Using Bright Data proxy for DuckDuckGo.")
             resp = requests.get(
                 url,
                 params=params,
                 headers=_DUCKDUCKGO_HEADERS,
-                timeout=25,
+                proxies=proxies,
+                timeout=35,
             )
             last_error_status = resp.status_code
 
