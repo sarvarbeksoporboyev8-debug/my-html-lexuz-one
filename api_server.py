@@ -101,14 +101,17 @@ class LexUZHandler(BaseHTTPRequestHandler):
                         return
                 
                 # Fallback to legacy string response
-                answer, responder = search_ask_with_provider(question, history=history)
+                answer, responder, chosen_chunks = search_ask_with_provider(question, history=history)
                 print(f"[API] Responder: {responder} (legacy)")
                 
-                self._send_json({
+                payload = {
                     "question": question,
                     "answer": answer,
                     "responder": responder
-                })
+                }
+                if chosen_chunks is not None:
+                    payload["chosenChunks"] = chosen_chunks
+                self._send_json(payload)
             
             except json.JSONDecodeError:
                 self._send_error("Invalid JSON")

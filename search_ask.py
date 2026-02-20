@@ -791,13 +791,13 @@ def _get_lex_chunk_context(question: str, top_k: int = 5) -> list:
         return []
 
 
-def summarize_web_results_with_gemini(question: str, results: list) -> str:
+def summarize_web_results_with_gemini(question: str, results: list) -> tuple:
     """Summarize fetched web results with Gemini, citing [1], [2], ... markers.
-    If WEB_FETCH_FULL_PAGES is True, fetches full page content for a pool from all merged results, then selects best N by BM25 on full text.
-    Optional: LEX_CHUNK_INDEX_PATH adds paragraph-level lex.uz chunks at the start of context.
+    Returns (summary_text, chosen_chunks) where chosen_chunks is a list of {"title", "url", "chunk_text"}
+    for the selected items sent to Gemini, or None if none.
     """
     if not GEMINI_API_KEY or not results:
-        return None
+        return None, None
 
     fetched = {}
     selected_items = None  # when set, only these go to context (with ids 1..n)
@@ -866,6 +866,14 @@ def summarize_web_results_with_gemini(question: str, results: list) -> str:
             if used_chars >= WEB_CONTEXT_MAX_CHARS:
                 break
 
+    # Build chosen_chunks for CLI output (the 5 selected items sent to Gemini)
+    chosen_chunks = None
+    if selected_items:
+        chosen_chunks = [
+            {"title": item.get("title", ""), "url": item.get("url", ""), "chunk_text": full_text}
+            for (item, full_text) in selected_items
+        ]
+
     prompt = f"""Siz O'zbekiston huquqiy masalalari bo'yicha yordamchi AI siz.
 
 SAVOL:
@@ -920,13 +928,13 @@ Tegishli savollar:
                 continue
 
             data = resp.json()
-            return data["candidates"][0]["content"]["parts"][0]["text"].strip()
+            return data["candidates"][0]["content"]["parts"][0]["text"].strip(), chosen_chunks
 
         except Exception as e:
             print(f"[WEB+GEMINI] {model} exception: {e}")
             continue
 
-    return None
+    return None, None
 
 
 def build_web_results_fallback_answer(results: list) -> str:
@@ -1553,9 +1561,10 @@ Tegishli savollar:
         return None
 
 
-def search_ask_with_provider(question: str, history: list = None) -> tuple[str, str]:
+def search_ask_with_provider(question: str, history: list = None) -> tuple[str, str, list]:
     """Main function with provider metadata.
     Priority: 1=DuckDuckGo (web), 2=Gemini, 3=Perplexity.
+    Returns (answer, provider, chosen_chunks). chosen_chunks is list of {title, url, chunk_text} or None.
     """
     print(f"\n{'='*60}")
     print(f"SAVOL: {question}")
@@ -1592,10 +1601,10 @@ def search_ask_with_provider(question: str, history: list = None) -> tuple[str, 
             print(f"[WEB] Lex.uz only: {len(web_results)} results (filtered from {before}).")
 
     if web_results:
-        gemini_summary = summarize_web_results_with_gemini(question, web_results)
+        gemini_summary, chosen_chunks = summarize_web_results_with_gemini(question, web_results)
         if gemini_summary:
-            return gemini_summary, "web+gemini"
-        return build_web_results_fallback_answer(web_results), "web-search"
+            return gemini_summary, "web+gemini", chosen_chunks
+        return build_web_results_fallback_answer(web_results), "web-search", None
 
     print("[WEB] No results, trying Gemini (priority 2)...")
 
@@ -1604,7 +1613,7 @@ def search_ask_with_provider(question: str, history: list = None) -> tuple[str, 
         print("\n[GEMINI] Using Google Gemini with Search Grounding...")
         answer = ask_gemini_grounded(question, history=history)
         if answer:
-            return answer, "gemini"
+            return answer, "gemini", None
         print("[GEMINI] Failed, trying Perplexity...")
     
     # 3. PERPLEXITY (priority 3) - Final fallback
@@ -1612,16 +1621,16 @@ def search_ask_with_provider(question: str, history: list = None) -> tuple[str, 
         print("\n[PERPLEXITY] Using Perplexity API...")
         answer = ask_perplexity(question)
         if answer:
-            return answer, "perplexity"
+            return answer, "perplexity", None
         print("[PERPLEXITY] Failed")
 
-    return "Javob topilmadi. Web/Gemini/Perplexity manbalaridan javob olib bo'lmadi.", "none"
+    return "Javob topilmadi. Web/Gemini/Perplexity manbalaridan javob olib bo'lmadi.", "none", None
 
 
-def search_ask(question: str, history: list = None) -> str:
-    """Main function: priority 1=DuckDuckGo, 2=Gemini, 3=Perplexity."""
-    answer, _provider = search_ask_with_provider(question, history=history)
-    return answer
+def search_ask(question: str, history: list = None) -> tuple[str, list]:
+    """Main function: priority 1=DuckDuckGo, 2=Gemini, 3=Perplexity. Returns (answer, chosen_chunks)."""
+    answer, _provider, chosen_chunks = search_ask_with_provider(question, history=history)
+    return answer, chosen_chunks
 
 
 def main():
@@ -1633,12 +1642,25 @@ def main():
         sys.exit(1)
     
     question = " ".join(sys.argv[1:])
-    answer = search_ask(question)
+    answer, chosen_chunks = search_ask(question)
     
     print("\n" + "="*60)
     print("JAVOB:")
     print("="*60)
     print(answer)
+    if chosen_chunks:
+        print("\n" + "="*60)
+        print("TANLANGAN 5 CHUNK (Gemini uchun yuborilgan manbalar):")
+        print("="*60)
+        for i, c in enumerate(chosen_chunks, 1):
+            title = c.get("title", "")
+            url = c.get("url", "")
+            text = (c.get("chunk_text") or "")[:500]
+            if len((c.get("chunk_text") or "")) > 500:
+                text += "..."
+            print(f"\n[{i}] {title}")
+            print(f"    {url}")
+            print(f"    {text}")
     print("\n⚠️  Bu huquqiy maslahat emas.")
 
 
