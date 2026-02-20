@@ -407,6 +407,44 @@ def _filter_lex_only(results: list) -> list:
     return out
 
 
+def _lex_doc_id(url: str) -> str | None:
+    """Extract canonical document id from lex.uz URL (e.g. /docs/-6052631 or /uz/docs/-6052631?otherlang=1 -> 6052631)."""
+    if not url or "/docs/" not in url:
+        return None
+    m = re.search(r"/docs/-?(\d+)", url)
+    return m.group(1) if m else None
+
+
+def _dedupe_lex_results(results: list) -> list:
+    """One result per lex.uz document: drop old.lex.uz/test.lex.uz; prefer main lex.uz and URL without query params."""
+    if not results:
+        return []
+    seen = {}  # doc_id -> best result
+    rest = []  # no doc_id (shouldn't happen if all lex)
+    for r in results:
+        url = (r.get("url") or "").strip()
+        if "old.lex.uz" in url or "test.lex.uz" in url:
+            continue
+        doc_id = _lex_doc_id(url)
+        if not doc_id:
+            rest.append(r)
+            continue
+        if doc_id not in seen:
+            seen[doc_id] = r
+            continue
+        # Prefer: main lex.uz (no old/test), then no query params, then /uz/ (Uzbek)
+        cur = seen[doc_id]
+        cur_url = (cur.get("url") or "").strip()
+        cur_score = (0 if "?" in cur_url else 2) + (1 if "/uz/" in cur_url or cur_url.count("/") <= 4 else 0)
+        new_score = (0 if "?" in url else 2) + (1 if "/uz/" in url or url.count("/") <= 4 else 0)
+        if new_score > cur_score:
+            seen[doc_id] = r
+    out = list(seen.values()) + rest
+    for i, item in enumerate(out, 1):
+        item["id"] = i
+    return out
+
+
 def _merge_web_results(first: list, second: list, prefer_uz: bool = True) -> list:
     """Merge two result lists, dedupe by URL. Optionally put lex.uz / .uz sources first."""
     seen = set()
@@ -1904,6 +1942,11 @@ def search_ask_with_provider(question: str, history: list = None) -> tuple[str, 
             print(f"[WEB] Lex.uz only: {len(web_results)} results (filtered from {before}).")
 
     if web_results:
+        # Dedupe by lex.uz document id (one per doc; drop old.lex.uz/test.lex.uz; prefer main lex.uz, no query params)
+        before_dedup = len(web_results)
+        web_results = _dedupe_lex_results(web_results)
+        if len(web_results) < before_dedup:
+            print(f"[WEB] Deduped to {len(web_results)} unique lex.uz documents (from {before_dedup}).")
         # Build context from search results only (title+url+snippet), no fetch/embedding/rerank
         all_as_chunks = [
             {"title": r.get("title", ""), "url": r.get("url", ""), "chunk_text": r.get("snippet", "")}
