@@ -72,8 +72,9 @@ WEB_DEBUG_PRINT_HTML = _env_bool("WEB_DEBUG_PRINT_HTML", False)  # print truncat
 WEB_DEBUG_PRINT_HTML_MAX = _env_int("WEB_DEBUG_PRINT_HTML_MAX", 4000)
 # Bright Data proxy for DuckDuckGo (avoids CAPTCHA); set BRIGHTDATA_ENABLED=1 and host/port/user/pass in Railway
 BRIGHTDATA_ENABLED = _env_bool("BRIGHTDATA_ENABLED", False)
-# When False, DuckDuckGo search is not restricted to site:lex.uz (broader results; Gemini still uses sources)
-WEB_SEARCH_SITE_FILTER_ENABLED = _env_bool("WEB_SEARCH_SITE_FILTER_ENABLED", False)
+# Restrict all web search to lex.uz: DDG uses site:lex.uz and we keep only lex.uz results
+WEB_SEARCH_SITE_FILTER_ENABLED = _env_bool("WEB_SEARCH_SITE_FILTER_ENABLED", True)
+WEB_LEX_ONLY = _env_bool("WEB_LEX_ONLY", True)
 GEMINI_WEB_SUMMARY_MAX_OUTPUT_TOKENS = _env_int("GEMINI_WEB_SUMMARY_MAX_OUTPUT_TOKENS", 600 if LOW_COST_MODE else 1200)
 PERPLEXITY_REWRITE_MAX_TOKENS = _env_int("PERPLEXITY_REWRITE_MAX_TOKENS", 80 if LOW_COST_MODE else 100)
 PERPLEXITY_ANSWER_MAX_TOKENS = _env_int("PERPLEXITY_ANSWER_MAX_TOKENS", 1600 if LOW_COST_MODE else 4000)
@@ -353,6 +354,16 @@ def search_web_top_results(query: str, max_results: int = 8) -> list:
         return []
 
 
+def _filter_lex_only(results: list) -> list:
+    """Keep only results whose URL is from lex.uz. Reassign ids 1..n."""
+    if not results:
+        return []
+    out = [r for r in results if r.get("url") and "lex.uz" in (r.get("url") or "").lower()]
+    for i, item in enumerate(out, 1):
+        item["id"] = i
+    return out
+
+
 def _merge_web_results(first: list, second: list, prefer_uz: bool = True) -> list:
     """Merge two result lists, dedupe by URL. Optionally put lex.uz / .uz sources first."""
     seen = set()
@@ -554,7 +565,7 @@ def rewrite_queries_with_perplexity(question: str, max_queries: int = 5) -> list
     if not PERPLEXITY_API_KEY:
         return []
 
-    system_prompt = """You are a search strategist. Output 4–5 different Google/DuckDuckGo search queries that together will find the best information for the user's question. The topic is whatever the user asks about (do not assume crypto, finance, or any specific domain). Vary the angle: e.g. relevant law/regulation, specific entities or bodies mentioned, restrictions or permissions, official sources (lex.uz, gov.uz, NAPP when relevant). Use Uzbek and English keywords appropriate to the question. One query per line. No numbering, bullets, or explanation. 6–12 words per query."""
+    system_prompt = """You are a search strategist. We only search lex.uz (Uzbek legal/normative database). Output 4–5 different search queries that together will find the best information on lex.uz for the user's question. Vary the angle: e.g. relevant law/regulation, document type, restrictions or permissions, keywords from the question. Use Uzbek and English keywords appropriate to the question. One query per line. No numbering, bullets, or explanation. 6–12 words per query. Queries will be run with site:lex.uz."""
 
     user_prompt = f"""Question: {question}
 
@@ -1381,6 +1392,11 @@ def search_ask_with_provider(question: str, history: list = None) -> tuple[str, 
             if all_results:
                 web_results = all_results
                 print(f"[WEB] Merged {len(web_results)} results (Uzbek/lex.uz preferred).")
+    if WEB_LEX_ONLY and web_results:
+        before = len(web_results)
+        web_results = _filter_lex_only(web_results)
+        if len(web_results) != before:
+            print(f"[WEB] Lex.uz only: {len(web_results)} results (filtered from {before}).")
 
     if web_results:
         gemini_summary = summarize_web_results_with_gemini(question, web_results)
