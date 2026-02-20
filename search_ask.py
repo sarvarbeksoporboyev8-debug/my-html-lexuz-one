@@ -1897,20 +1897,27 @@ def search_ask_with_provider(question: str, history: list = None) -> tuple[str, 
             print(f"[WEB] Lex.uz only: {len(web_results)} results (filtered from {before}).")
 
     if web_results:
-        # Run our retrieval once: fetch, chunk, select top N (lex.uz sources)
-        chosen_chunks, context_lines = run_web_retrieval(question, web_results)
-        # Priority 1: Perplexity answering ONLY from our chosen chunks (no Perplexity search)
-        if chosen_chunks and PERPLEXITY_API_KEY:
-            print("\n[PERPLEXITY] Answering from our sources only (no Perplexity search)...")
-            answer = ask_perplexity_from_sources(question, chosen_chunks)
+        # Build context from search results only (title+url+snippet), no fetch/embedding/rerank
+        all_as_chunks = [
+            {"title": r.get("title", ""), "url": r.get("url", ""), "chunk_text": r.get("snippet", "")}
+            for r in web_results[:50]
+        ]
+        context_lines = [
+            f"[{i}] {c['title']}\nURL: {c['url']}\nSnippet: {c['chunk_text']}"
+            for i, c in enumerate(all_as_chunks, 1)
+        ]
+        # Priority 1: Perplexity from these sources only
+        if all_as_chunks and PERPLEXITY_API_KEY:
+            print(f"\n[PERPLEXITY] Answering from {len(all_as_chunks)} search results only (no Perplexity search)...")
+            answer = ask_perplexity_from_sources(question, all_as_chunks)
             if answer:
-                return answer, "perplexity+our_sources", chosen_chunks
-        # Priority 2: Gemini with same context
+                return answer, "perplexity+our_sources", all_as_chunks
+        # Priority 2: Gemini from same sources only (no fetch/embedding/rerank)
         if context_lines and GEMINI_API_KEY:
-            print("\n[WEB+GEMINI] Summarizing with Gemini from our context...")
+            print(f"\n[WEB+GEMINI] Summarizing with Gemini from {len(context_lines)} search results only...")
             answer = _call_gemini_with_context(question, context_lines)
             if answer:
-                return answer, "web+gemini", chosen_chunks
+                return answer, "web+gemini", all_as_chunks
         return build_web_results_fallback_answer(web_results), "web-search", None
 
     print("[WEB] No results, trying Gemini Search Grounding then Perplexity...")
